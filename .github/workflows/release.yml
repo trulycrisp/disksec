@@ -1,0 +1,27 @@
+name: Release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+permissions:
+  contents: write
+jobs:
+  release:
+    strategy:
+      matrix:
+        platform:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: "--locked --release"
+      - name: Package and upload to the release
+        uses: houseabsolute/actions-rust-release@v0
+        with:
+          executable-name: disksec
+          target: ${{ matrix.platform.target }}
+          changes-file: ""
