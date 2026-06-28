@@ -22,21 +22,29 @@ Ideally drives should be tested attached directly to a hardware SATA controller,
 ## Usage
 
 List available drives:
+
 ```
 disksec list
 ```
 
 Run checks on single drive:
+
 ```
 disksec run <PATH>
 ```
 
 Run checks on all drives:
+
 ```
 disksec run
 ```
 
 Run checks on all drives with verbose logging, and write results to file:
+
 ```
 disksec run -vv -o output.txt
 ```
+
+Example output:
+
+![example output](.github/assets/image.png)
