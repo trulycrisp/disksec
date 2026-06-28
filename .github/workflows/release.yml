@@ -18,7 +18,7 @@ jobs:
         uses: houseabsolute/actions-rust-cross@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: "--locked --release"
+          args: "--release"
       - name: Package and upload to the release
         uses: houseabsolute/actions-rust-release@v0
         with:
