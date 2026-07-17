@@ -6,7 +6,7 @@ pub mod wd;
 
 use std::path::{Path, PathBuf};
 
-use log::{debug, info};
+use log::debug;
 
 use crate::{
     os,
@@ -47,7 +47,7 @@ impl std::fmt::Display for Error {
             Self::Scsi(_) => write!(f, "SCSI error"),
             Self::Ata(_) => write!(f, "ATA error"),
             Self::InvalidDrive => write!(f, "invalid drive"),
-            Self::Vendor(_) => write!(f, "vendor-specific error"),
+            Self::Vendor(x) => write!(f, "{} error", x.name()),
         }
     }
 }
@@ -70,7 +70,7 @@ impl From<scsi::Error> for Error {
 impl From<ata::Error> for Error {
     fn from(value: ata::Error) -> Self {
         match value {
-            ata::Error::Scsi(x) => x.into(),
+            ata::Error::Scsi(scsi::Error::Os(x)) => x.into(),
             x => Self::Ata(x),
         }
     }
@@ -83,7 +83,10 @@ impl From<Box<dyn VendorError>> for Error {
 }
 
 /// Vendor type check error.
-pub trait VendorError: std::error::Error {}
+pub trait VendorError: std::error::Error {
+    /// Get display name.
+    fn name(&self) -> &str;
+}
 
 /// Item of the iterator returned by `Drive::open_all`.
 pub type OpenAllItem = Result<Drive, (PathBuf, Error)>;
@@ -137,17 +140,14 @@ impl Drive {
             let vendor_name = vendor_type.name();
             debug!("[{self}] Starting vendor check: {vendor_name}");
 
-            if let Some(check_results) = vendor_type.check(self)? {
-                let vendor_result = VendorResult {
+            let vendor_type_result = vendor_type.check(self)?;
+            debug!("[{self}] Vendor type result: {vendor_name} ({vendor_type_result:?})");
+
+            if let Some(check_results) = vendor_type_result {
+                vendor_results.push(VendorResult {
                     name: vendor_name.into(),
                     results: check_results,
-                };
-
-                info!("[{self}] Vendor type result: {vendor_result}");
-
-                vendor_results.push(vendor_result);
-            } else {
-                debug!("[{self}] Vendor type unsupported: {vendor_name}");
+                });
             }
         }
 
@@ -194,40 +194,28 @@ impl std::fmt::Display for Drive {
 }
 
 /// Result of single check for vendor type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CheckResult {
     /// Check display name.
     pub name: String,
     /// Check display result.
-    pub result: String,
+    pub result: Result<String, Error>,
 }
 
-impl std::fmt::Display for CheckResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.name, self.result)
+impl CheckResult {
+    /// Construct check result.
+    pub fn new(name: String, result: Result<String, Error>) -> Self {
+        Self { name, result }
     }
 }
 
 /// Set of check results for vendor type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct VendorResult {
     /// Vendor type display name.
     pub name: String,
     /// Check results.
     pub results: Box<[CheckResult]>,
-}
-
-impl std::fmt::Display for VendorResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let results = self
-            .results
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        write!(f, "{} ({results})", self.name)
-    }
 }
 
 /// Vendor-specific drive type.
@@ -245,6 +233,7 @@ const VENDOR_TYPES: &[&dyn VendorType] = &[
     &phison::ata::s9::VendorType,
     &phison::ata::s10::VendorType,
     &phison::ata::s11::VendorType,
+    &phison::ata::s12::VendorType,
     &seagate::ata::f3::VendorType,
     &wd::ata::marvell::VendorType,
 ];

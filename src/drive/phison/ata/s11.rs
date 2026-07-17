@@ -5,9 +5,11 @@ mod vuc;
 
 use std::num::NonZero;
 
-use log::debug;
+use log::{debug, info};
 
+use super::VucLockState;
 use crate::{
+    cpu::VECTOR_TABLE_SIZE,
     drive,
     protocol::{
         Transfer,
@@ -15,8 +17,10 @@ use crate::{
     },
 };
 
-/// Memory address of Xtensa exception vector
-const EXCEPTION_VECTOR_ADDRESS: u32 = 0x5C0E_0000;
+/// Display name of drive type.
+const DISPLAY_NAME: &str = "Phison S11";
+/// Memory address of Xtensa exception vector table.
+const EXCEPTION_VECTOR_TABLE_ADDRESS: u32 = 0x5C0E_0000;
 
 /// S11 error.
 #[derive(Debug)]
@@ -28,17 +32,17 @@ enum Error {
     /// Invalid VUC unlock key.
     InvalidVucKey(u16),
     /// VUC unlock handshake failed.
-    VucUnlockFailed(Option<VucMode>),
+    VucUnlockFailed(Option<VucLockState>),
     /// Re-locking VUC access failed.
-    VucLockFailed(Option<VucMode>),
+    VucLockFailed(Option<VucLockState>),
     /// Invalid info block data.
     InvalidInfoBlock,
-    /// Invalid firmware header flash data.
+    /// Invalid firmware flash header data.
     InvalidFirmwareFlashHeader,
     /// Invalid VUC read/write register size.
     InvalidRegisterSize(usize),
-    /// Invalid Xtensa exception vector in memory.
-    InvalidExceptionVector,
+    /// Invalid Xtensa exception vector table in memory.
+    InvalidExceptionVectorTable,
 }
 
 impl std::error::Error for Error {
@@ -53,7 +57,7 @@ impl std::error::Error for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let display_vuc_lock =
-            |x: Option<VucMode>| x.as_ref().map_or("N/A".into(), ToString::to_string);
+            |x: Option<VucLockState>| x.as_ref().map_or("N/A".into(), ToString::to_string);
 
         match self {
             Self::Ata(_) => write!(f, "ATA error"),
@@ -64,12 +68,16 @@ impl std::fmt::Display for Error {
             Self::InvalidInfoBlock => write!(f, "invalid info block"),
             Self::InvalidFirmwareFlashHeader => write!(f, "invalid firmware flash header"),
             Self::InvalidRegisterSize(x) => write!(f, "invalid register size {x}"),
-            Self::InvalidExceptionVector => write!(f, "invalid Xtensa exception vector"),
+            Self::InvalidExceptionVectorTable => write!(f, "invalid Xtensa exception vector table"),
         }
     }
 }
 
-impl drive::VendorError for Error {}
+impl drive::VendorError for Error {
+    fn name(&self) -> &str {
+        DISPLAY_NAME
+    }
+}
 
 impl From<ata::Error> for Error {
     fn from(value: ata::Error) -> Self {
@@ -88,7 +96,7 @@ impl From<Error> for drive::Error {
 
 /// VUC operation in feature register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VucFeature {
+enum VucOperation {
     /// Read system information.
     SystemInfo = 0x13,
     /// Set parameter data for following VUC.
@@ -107,6 +115,22 @@ pub enum VucFeature {
     VucUnlockWrite = 0xC6,
     /// Re-lock VUC access.
     VucLock = 0xC7,
+}
+
+impl std::fmt::Display for VucOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SystemInfo => write!(f, "system info"),
+            Self::SetParameter => write!(f, "set parameter"),
+            Self::ReadInfoBlock => write!(f, "read info block"),
+            Self::VerifyFlash => write!(f, "verify flash"),
+            Self::ReadRegister => write!(f, "read register"),
+            Self::VucUnlockStart => write!(f, "VUC unlock start"),
+            Self::VucUnlockRead => write!(f, "VUC unlock read"),
+            Self::VucUnlockWrite => write!(f, "VUC unlock write"),
+            Self::VucLock => write!(f, "VUC lock"),
+        }
+    }
 }
 
 /// Flash interface type.
@@ -151,53 +175,6 @@ impl FlashInterface {
     }
 }
 
-/// VUC lock mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VucMode {
-    /// Locked.
-    Locked = 1,
-    /// Engineering.
-    Engineering = 2,
-    /// Unlocked.
-    Unlocked = 3,
-    /// No lock (no key configured).
-    NoLock = 4,
-}
-
-impl VucMode {
-    /// Parse from raw byte.
-    fn parse(value: u8) -> Result<Option<Self>, Error> {
-        const VARIANTS: &[VucMode] = &[
-            VucMode::Locked,
-            VucMode::Engineering,
-            VucMode::Unlocked,
-            VucMode::NoLock,
-        ];
-
-        if value == 0 {
-            return Ok(None);
-        }
-
-        VARIANTS
-            .iter()
-            .find(|&&x| x as u8 == value)
-            .copied()
-            .ok_or(Error::InvalidSystemInfo)
-            .map(Some)
-    }
-}
-
-impl std::fmt::Display for VucMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Locked => write!(f, "locked"),
-            Self::Engineering => write!(f, "engineering"),
-            Self::Unlocked => write!(f, "unlocked"),
-            Self::NoLock => write!(f, "no lock"),
-        }
-    }
-}
-
 /// VUC system info result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SystemInfo {
@@ -229,8 +206,8 @@ struct SystemInfo {
     form_factor: Option<identify::FormFactor>,
     /// Flash blocks per superblock.
     blocks_per_superblock: u8,
-    /// Firmware sub-version revision.
-    firmware_revision: String,
+    /// Firmware sub-version.
+    firmware_subversion: String,
     /// Stride between dies in a flash block address.
     die_stride: Option<NonZero<u16>>,
     ///  Total flash size divided by superblock size.
@@ -261,10 +238,12 @@ struct SystemInfo {
     pram_icode_programmed: bool,
     /// Page size including metadata if any.
     physical_page_size: Option<NonZero<u16>>,
+    /// VUC lock has a key configured.
+    vuc_lock_key_set: bool,
     /// VUC lock key ID.
-    vuc_key: Option<NonZero<u16>>,
-    /// VUC lock mode.
-    vuc_mode: Option<VucMode>,
+    vuc_lock_key: Option<NonZero<u16>>,
+    /// VUC lock state.
+    vuc_lock_state: Option<VucLockState>,
 }
 
 impl SystemInfo {
@@ -286,7 +265,7 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
     #[allow(clippy::too_many_lines)]
     fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
         const MAX_CE_COUNT: u8 = 16;
-        const CHANNEL_COUNT: u8 = 2;
+        const MAX_CHANNEL_COUNT: u8 = 2;
         const SRAM_SIZE: u8 = 32;
         const FIRMWARE_VERSION_PREFIX: &str = "SB";
         const FIRMWARE_DATE_PREFIX: &str = "20";
@@ -297,7 +276,7 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
         }
 
         let channel_count = data[2];
-        if channel_count != CHANNEL_COUNT {
+        if channel_count > MAX_CHANNEL_COUNT {
             return Err(Error::InvalidSystemInfo);
         }
 
@@ -322,7 +301,7 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
             identify::FormFactor::parse(data[75]).or(Err(Error::InvalidSystemInfo))?;
 
         let blocks_per_superblock = data[200];
-        let firmware_revision = Self::parse_str(&data[201..203])?.into();
+        let firmware_subversion = Self::parse_str(&data[201..203])?.into();
 
         let die_stride = NonZero::new(u16::from_le_bytes([data[204], data[205]]));
         let superblock_index_count =
@@ -370,8 +349,10 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
 
         let pram_icode_programmed = data[363] != 0;
         let physical_page_size = NonZero::new(u16::from_le_bytes([data[418], data[419]]));
-        let vuc_key = NonZero::new(u16::from_be_bytes([data[424], data[425]]));
-        let vuc_mode = VucMode::parse(data[426])?;
+
+        let vuc_lock_key_set = (data[423] & (1 << 3)) != 0;
+        let vuc_lock_key = NonZero::new(u16::from_be_bytes([data[424], data[425]]));
+        let vuc_lock_state = VucLockState::parse(data[426]).or(Err(Error::InvalidSystemInfo))?;
 
         Ok(Self {
             ce_count,
@@ -388,7 +369,7 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
             planes_per_die,
             form_factor,
             blocks_per_superblock,
-            firmware_revision,
+            firmware_subversion,
             die_stride,
             superblock_index_count,
             sectors_per_superblock,
@@ -404,8 +385,9 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
             firmware_date,
             pram_icode_programmed,
             physical_page_size,
-            vuc_key,
-            vuc_mode,
+            vuc_lock_key_set,
+            vuc_lock_key,
+            vuc_lock_state,
         })
     }
 }
@@ -459,9 +441,7 @@ impl TryFrom<&[u8; Self::SIZE]> for InfoBlock {
     type Error = Error;
 
     fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
-        const MAGIC: &[u8] = b"PhIsOn";
-
-        if !data.starts_with(MAGIC) {
+        if !data.starts_with(super::INFO_BLOCK_MAGIC) {
             return Err(Error::InvalidInfoBlock);
         }
 
@@ -491,14 +471,13 @@ impl TryFrom<&[u8; Self::SIZE]> for FirmwareFlashHeader {
 
     fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
         const MAGIC: &[u8] = b"ID";
-        const SECTIONS_OFFSET: usize = 288;
 
         if !data.starts_with(MAGIC) {
             return Err(Error::InvalidFirmwareFlashHeader);
         }
 
-        let section_values: [u32; Self::SECTION_COUNT * 2] = std::array::from_fn(|x| {
-            let offset = SECTIONS_OFFSET + x * size_of::<u32>();
+        let section_values: [_; Self::SECTION_COUNT * 2] = std::array::from_fn(|x| {
+            let offset = 288 + x * size_of::<u32>();
             u32::from_le_bytes([
                 data[offset],
                 data[offset + 1],
@@ -569,15 +548,22 @@ impl Drive<'_> {
     }
 
     /// Execute VUC.
-    fn vuc(self, transfer: Transfer, feature: VucFeature, lba: u32) -> Result<(), ata::Error> {
-        (&self as &dyn super::Drive).vuc(transfer, feature as _, lba)
+    fn vuc(self, transfer: Transfer, operation: VucOperation, lba: u32) -> Result<(), ata::Error> {
+        let log_info = format!("{operation} (transfer: {transfer}, lba: {lba:#x})");
+        debug!("[{self}] Executing VUC: {log_info}");
+
+        (&self as &dyn super::Drive).vuc(transfer, operation as _, lba)?;
+
+        info!("[{self}] Executed VUC: {log_info}");
+
+        Ok(())
     }
 
     /// VUC system info.
     fn vuc_system_info(self) -> Result<SystemInfo, Error> {
         let mut data = [0u8; SystemInfo::SIZE];
 
-        self.vuc(Transfer::Read(&mut data), VucFeature::SystemInfo, 0)?;
+        self.vuc(Transfer::Read(&mut data), VucOperation::SystemInfo, 0)?;
 
         let system_info = (&data).try_into()?;
         debug!("[{self}] System info: {system_info:?}");
@@ -586,7 +572,7 @@ impl Drive<'_> {
     }
 
     /// Derive CRC-16 based cipher seed from VUC unlock key.
-    fn vuc_key_crc16_cipher_seed(key: &[u8]) -> u32 {
+    fn vuc_lock_key_crc16_cipher_seed(key: &[u8]) -> u32 {
         const BUFFER_SIZE: usize = 32;
 
         let mut buffer = [0u8; BUFFER_SIZE];
@@ -604,8 +590,8 @@ impl Drive<'_> {
     fn vuc_unlock_engineering(self) -> Result<(), Error> {
         // Return if engineering mode not needed
         if matches!(
-            self.vuc_system_info()?.vuc_mode,
-            None | Some(VucMode::Engineering)
+            self.vuc_system_info()?.vuc_lock_state,
+            None | Some(VucLockState::Engineering)
         ) {
             return Ok(());
         }
@@ -618,9 +604,9 @@ impl Drive<'_> {
             .download_microcode(&dlmc_data, ata::command::DlmcSubcommand::Full, 0)?;
 
         // Verify engineering mode
-        let vuc_mode = self.vuc_system_info()?.vuc_mode;
-        if vuc_mode != Some(VucMode::Engineering) {
-            return Err(Error::VucUnlockFailed(vuc_mode));
+        let vuc_lock_state = self.vuc_system_info()?.vuc_lock_state;
+        if vuc_lock_state != Some(VucLockState::Engineering) {
+            return Err(Error::VucUnlockFailed(vuc_lock_state));
         }
 
         Ok(())
@@ -632,14 +618,14 @@ impl Drive<'_> {
 
         // Return if unlock not needed
         if matches!(
-            system_info.vuc_mode,
-            None | Some(VucMode::Unlocked | VucMode::NoLock)
+            system_info.vuc_lock_state,
+            None | Some(VucLockState::Unlocked | VucLockState::NoLock)
         ) {
             return Ok(());
         }
 
         // Get key for id
-        let key_id = system_info.vuc_key.map_or(0, NonZero::get);
+        let key_id = system_info.vuc_lock_key.map_or(0, NonZero::get);
         let key = vuc::KEYS
             .get((key_id as usize).wrapping_sub(1))
             .ok_or(Error::InvalidVucKey(key_id))?;
@@ -651,26 +637,34 @@ impl Drive<'_> {
         self.vuc_unlock_engineering()?;
 
         // Start unlock handshake
-        self.vuc(Transfer::None, VucFeature::VucUnlockStart, 0)?;
+        self.vuc(Transfer::None, VucOperation::VucUnlockStart, 0)?;
 
         // Read challenge
         let mut read_data = [0u8; SECTOR_SIZE];
-        self.vuc(Transfer::Read(&mut read_data), VucFeature::VucUnlockRead, 0)?;
+        self.vuc(
+            Transfer::Read(&mut read_data),
+            VucOperation::VucUnlockRead,
+            0,
+        )?;
 
         // Encrypt challenge, two rounds
-        let mut seed = Self::vuc_key_crc16_cipher_seed(key);
+        let mut seed = Self::vuc_lock_key_crc16_cipher_seed(key);
         let mut write_data = algorithm::cipher_crc16(&read_data, seed, 0);
-        seed ^= Self::vuc_key_crc16_cipher_seed(&write_data);
+        seed ^= Self::vuc_lock_key_crc16_cipher_seed(&write_data);
         write_data = algorithm::cipher_crc16(&write_data, seed, 0);
 
         // Write challenge
-        self.vuc(Transfer::Write(&write_data), VucFeature::VucUnlockWrite, 0)?;
+        self.vuc(
+            Transfer::Write(&write_data),
+            VucOperation::VucUnlockWrite,
+            0,
+        )?;
 
         // Verify unlocked
-        let vuc_mode = self.vuc_system_info()?.vuc_mode;
-        if vuc_mode != Some(VucMode::Unlocked) {
+        let vuc_lock_state = self.vuc_system_info()?.vuc_lock_state;
+        if vuc_lock_state != Some(VucLockState::Unlocked) {
             self.vuc_lock()?; // Reset state
-            return Err(Error::VucUnlockFailed(vuc_mode));
+            return Err(Error::VucUnlockFailed(vuc_lock_state));
         }
 
         debug!("[{self}] VUC unlocked");
@@ -682,22 +676,22 @@ impl Drive<'_> {
     fn vuc_lock(self) -> Result<(), Error> {
         // Return if lock not needed
         if matches!(
-            self.vuc_system_info()?.vuc_mode,
-            None | Some(VucMode::Locked | VucMode::NoLock)
+            self.vuc_system_info()?.vuc_lock_state,
+            None | Some(VucLockState::Locked | VucLockState::NoLock)
         ) {
             return Ok(());
         }
 
-        self.vuc(Transfer::None, VucFeature::VucLock, 0)?;
+        self.vuc(Transfer::None, VucOperation::VucLock, 0)?;
 
         // Verify locked to default mode. Sometimes (e.g. burner firmware or protected
         // mode) default mode is engineering
         let system_info = self.vuc_system_info()?;
         if !matches!(
-            system_info.vuc_mode,
-            Some(VucMode::Locked | VucMode::Engineering)
+            system_info.vuc_lock_state,
+            Some(VucLockState::Locked | VucLockState::Engineering)
         ) {
-            return Err(Error::VucLockFailed(system_info.vuc_mode));
+            return Err(Error::VucLockFailed(system_info.vuc_lock_state));
         }
 
         debug!("[{self}] VUC locked");
@@ -709,7 +703,7 @@ impl Drive<'_> {
     fn vuc_read_info_block(self) -> Result<InfoBlock, Error> {
         let mut data = [0u8; InfoBlock::SIZE];
 
-        self.vuc(Transfer::Read(&mut data), VucFeature::ReadInfoBlock, 0)?;
+        self.vuc(Transfer::Read(&mut data), VucOperation::ReadInfoBlock, 0)?;
         let info_block = (&data).try_into()?;
 
         debug!("[{self}] Info block: {info_block:?}");
@@ -720,7 +714,9 @@ impl Drive<'_> {
     /// VUC verify flash.
     fn vuc_verify_flash(self, data: &mut [u8], code: bool) -> Result<(), Error> {
         let lba = u32::from(code) << 16;
-        self.vuc(Transfer::Read(data), VucFeature::VerifyFlash, lba)?;
+
+        self.vuc(Transfer::Read(data), VucOperation::VerifyFlash, lba)?;
+
         Ok(())
     }
 
@@ -746,13 +742,11 @@ impl Drive<'_> {
         }
 
         let parameter = address.to_le_bytes();
-        self.vuc(Transfer::Write(&parameter), VucFeature::SetParameter, 0)?;
+        self.vuc(Transfer::Write(&parameter), VucOperation::SetParameter, 0)?;
 
         let mut buffer = [0u8; SECTOR_SIZE];
-        // Access size goes in LBA byte 1 (size << 8); ReadRegister returns the value
-        // after a 4-byte header.
         let lba = u32::try_from(size << 8).unwrap();
-        self.vuc(Transfer::Read(&mut buffer), VucFeature::ReadRegister, lba)?;
+        self.vuc(Transfer::Read(&mut buffer), VucOperation::ReadRegister, lba)?;
 
         data.copy_from_slice(&buffer[RESULT_OFFSET..RESULT_OFFSET + size]);
 
@@ -775,25 +769,25 @@ impl Drive<'_> {
         Ok(())
     }
 
-    /// Check data is an Xtensa exception vector
-    fn is_exception_vector(data: &[u8; SECTOR_SIZE]) -> bool {
-        const EXCEPTION_VECTOR: &[u8] = &[
+    /// Check data is an Xtensa exception vector table.
+    fn is_exception_vector_table(data: &[u8; VECTOR_TABLE_SIZE]) -> bool {
+        const PREFIX: &[u8] = &[
             0x00, 0xC5, 0x49, // s32e a0,a5,-0x10
             0x10, 0xD5, 0x49, // s32e a1,a5,-0xc
             0x20, 0xE5, 0x49, // s32e a2,a5,-0x8
             0x30, 0xF5, 0x49, // s32e a3,a5,-0x4
         ];
 
-        data.starts_with(EXCEPTION_VECTOR)
+        data.starts_with(PREFIX)
     }
 
-    /// Read Xtensa exception vector from controller memory.
-    fn read_exception_vector(self) -> Result<[u8; SECTOR_SIZE], Error> {
+    /// Read Xtensa exception vector table from controller memory.
+    fn read_exception_vector_table(self) -> Result<[u8; VECTOR_TABLE_SIZE], Error> {
         let mut data = [0; _];
-        self.read_memory(EXCEPTION_VECTOR_ADDRESS, &mut data)?;
+        self.read_memory(EXCEPTION_VECTOR_TABLE_ADDRESS, &mut data)?;
 
-        if !Self::is_exception_vector(&data) {
-            return Err(Error::InvalidExceptionVector);
+        if !Self::is_exception_vector_table(&data) {
+            return Err(Error::InvalidExceptionVectorTable);
         }
 
         Ok(data)
@@ -808,7 +802,7 @@ impl super::Drive for Drive<'_> {
 
 impl std::fmt::Display for Drive<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Phison S11 {}", self.ata.path().display())
+        write!(f, "{DISPLAY_NAME} {}", self.ata.path().display())
     }
 }
 
@@ -816,38 +810,35 @@ impl std::fmt::Display for Drive<'_> {
 pub struct VendorType;
 
 impl VendorType {
-    /// Check reading info block.
+    /// Check read info block.
     fn check_read_info_block(drive: Drive) -> drive::CheckResult {
         let read_info_block_result = drive.vuc_read_info_block();
         debug!("[{drive}] Read info block: {read_info_block_result:?}");
 
         let result = match read_info_block_result {
-            Ok(x) => format!("Success (serial: {}, model: {})", x.serial, x.model),
-            Err(x) => format!("Fail ({x})"),
+            Ok(x) => Ok(format!("(serial: {}, model: {})", x.serial, x.model)),
+            Err(x) => Err(x.into()),
         };
 
-        drive::CheckResult {
-            name: "Read info block".into(),
-            result,
-        }
+        drive::CheckResult::new("Read info block".into(), result)
     }
 
-    /// Check reading firmware.
+    /// Check read firmware.
     fn check_read_firmware(drive: Drive) -> drive::CheckResult {
         let read_firmware_result = drive.read_firmware_flash_header();
         debug!("[{drive}] Read firmware flash header: {read_firmware_result:?}");
 
         let result = match read_firmware_result {
-            Ok(x) => format!(
-                "Success (sections {})",
+            Ok(x) => Ok(format!(
+                "Sections ({})",
                 x.sections
                     .iter()
                     .filter(|&(_, x)| *x != 0)
-                    .map(|(x, y)| format!("(address: {x:#x}, size: {y})"))
+                    .map(|(x, y)| format!("{x:#x}: <{y} bytes>"))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
-            Err(x) => format!("Fail ({x})"),
+            )),
+            Err(x) => Err(x.into()),
         };
 
         drive::CheckResult {
@@ -856,27 +847,22 @@ impl VendorType {
         }
     }
 
-    /// Check reading controller memory.
+    /// Check read controller memory.
     fn check_read_memory(drive: Drive) -> drive::CheckResult {
-        let result = match drive.read_exception_vector() {
-            Ok(_) => {
-                format!("Success (xtensa exception vector at {EXCEPTION_VECTOR_ADDRESS:#010x})")
-            },
-            Err(x) => format!("Fail ({x})"),
+        let result = match drive.read_exception_vector_table() {
+            Ok(_) => Ok(format!(
+                "Xtensa exception vector table at {EXCEPTION_VECTOR_TABLE_ADDRESS:#010x}"
+            )),
+            Err(x) => Err(x.into()),
         };
 
-        drive::CheckResult {
-            name: "Read memory".into(),
-            result,
-        }
+        drive::CheckResult::new("Read memory".into(), result)
     }
 }
 
 impl drive::VendorType for VendorType {
     fn name(&self) -> &str {
-        const NAME: &str = "Phison S11";
-
-        NAME
+        DISPLAY_NAME
     }
 
     /// Run checks on drive.
@@ -895,41 +881,39 @@ impl drive::VendorType for VendorType {
 
         let mut results = Vec::new();
 
-        let system_info = drive.vuc_system_info()?;
-
         // VUC System Info part of the validation checks, assume it always succeeds
-        results.push(drive::CheckResult {
-            name: "System info".into(),
-            result: format!(
+        let system_info = drive.vuc_system_info()?;
+        results.push(drive::CheckResult::new(
+            "System info".into(),
+            Ok(format!(
                 "(firmware: {}-{} ({}), CEs: {}, blocks per CE: {}, pages per block: {}, sectors \
                  per page: {})",
                 system_info.firmware_version,
-                system_info.firmware_revision,
+                system_info.firmware_subversion,
                 system_info.firmware_date,
                 system_info.ce_count,
                 system_info.blocks_per_ce,
                 system_info.pages_per_block,
                 system_info.sectors_per_page
-            ),
-        });
+            )),
+        ));
 
         let vuc_unlock_result = drive.vuc_unlock();
-        results.push(drive::CheckResult {
-            name: "VUC unlock".into(),
-            result: match system_info.vuc_mode {
-                None | Some(VucMode::NoLock) => "N/A (no lock)".into(),
-                Some(VucMode::Unlocked) => "N/A (unlocked)".into(),
-                _ => match &vuc_unlock_result {
-                    Ok(()) => format!(
-                        "Success (key {})",
-                        system_info.vuc_key.map_or(0, NonZero::get)
-                    ),
-                    Err(x) => format!("Failed ({x})"),
-                },
-            },
-        });
+        let vuc_unlocked = vuc_unlock_result.is_ok();
+        let vuc_unlock_check_result = match vuc_unlock_result {
+            Ok(()) => Ok(match system_info.vuc_lock_state {
+                None | Some(VucLockState::NoLock) => "N/A (no lock)".into(),
+                Some(VucLockState::Unlocked) => "N/A (unlocked)".into(),
+                _ => format!("key {}", system_info.vuc_lock_key.map_or(0, NonZero::get)),
+            }),
+            Err(x) => Err(x.into()),
+        };
+        results.push(drive::CheckResult::new(
+            "VUC unlock".into(),
+            vuc_unlock_check_result,
+        ));
 
-        if vuc_unlock_result.is_ok() {
+        if vuc_unlocked {
             // Only proceed with other checks if VUC unlock succeeded
             results.push(Self::check_read_info_block(drive));
             results.push(Self::check_read_firmware(drive));
@@ -1028,19 +1012,24 @@ mod tests {
     }
 
     #[test]
-    fn is_exception_vector() {
-        const DATA_VALID: &[&[u8; SECTOR_SIZE]] = &[
-            test_data::kingston_a400::EXCEPTION_VECTOR,
-            test_data::inland_professional::EXCEPTION_VECTOR,
+    fn is_exception_vector_table() {
+        const DATA_VALID: &[&[u8; VECTOR_TABLE_SIZE]] = &[
+            test_data::kingston_a400::EXCEPTION_VECTOR_TABLE,
+            test_data::inland_professional::EXCEPTION_VECTOR_TABLE,
         ];
-        const DATA_INVALID: &[&[u8; SECTOR_SIZE]] = &[&[0; _], &[0xFF; _]];
+        const DATA_INVALID: &[&[u8; VECTOR_TABLE_SIZE]] = &[
+            &[0; _],
+            &[0xFF; _],
+            test_data::phison_s5::VECTOR_TABLE, // ARCompact
+            test_data::kingston_dc500r::EXCEPTION_VECTOR_TABLE, // ARM32
+        ];
 
         for &data in DATA_VALID {
-            assert!(Drive::is_exception_vector(data));
+            assert!(Drive::is_exception_vector_table(data));
         }
 
         for &data in DATA_INVALID {
-            assert!(!Drive::is_exception_vector(data));
+            assert!(!Drive::is_exception_vector_table(data));
         }
     }
 }

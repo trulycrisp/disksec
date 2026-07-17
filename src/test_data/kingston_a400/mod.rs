@@ -16,5 +16,5 @@ pub(crate) const SYSTEM_INFO: &[u8; 512] = include_bytes!("system_info.bin");
 pub(crate) const INFO_BLOCK: &[u8; 512] = include_bytes!("info_block.bin");
 /// Firmware header on flash.
 pub(crate) const FIRMWARE_FLASH_HEADER: &[u8; 4096] = include_bytes!("firmware_flash_header.bin");
-/// Exception vector in memory.
-pub(crate) const EXCEPTION_VECTOR: &[u8; 512] = include_bytes!("exception_vector.bin");
+/// CPU exception vector table in memory.
+pub(crate) const EXCEPTION_VECTOR_TABLE: &[u8; 512] = include_bytes!("exception_vector_table.bin");

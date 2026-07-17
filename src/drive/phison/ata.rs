@@ -2,13 +2,14 @@
 
 pub mod s10;
 pub mod s11;
+pub mod s12;
 pub mod s5;
 pub mod s8;
 pub mod s9;
 
 use std::fmt::Display;
 
-use log::{debug, info};
+use log::debug;
 
 use crate::protocol::{
     Transfer,
@@ -19,6 +20,56 @@ use crate::protocol::{
         log::phy_event_counters::CounterId,
     },
 };
+
+/// Info block data magic prefix.
+const INFO_BLOCK_MAGIC: &[u8] = b"PhIsOn";
+
+/// VUC lock state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VucLockState {
+    /// Locked.
+    Locked = 1,
+    /// Engineering.
+    Engineering = 2,
+    /// Unlocked.
+    Unlocked = 3,
+    /// No lock (no key configured).
+    NoLock = 4,
+}
+
+impl VucLockState {
+    /// Parse from raw byte.
+    fn parse(value: u8) -> Result<Option<Self>, u8> {
+        const VARIANTS: &[VucLockState] = &[
+            VucLockState::Locked,
+            VucLockState::Engineering,
+            VucLockState::Unlocked,
+            VucLockState::NoLock,
+        ];
+
+        if value == 0 {
+            return Ok(None);
+        }
+
+        VARIANTS
+            .iter()
+            .find(|&&x| x as u8 == value)
+            .copied()
+            .ok_or(value)
+            .map(Some)
+    }
+}
+
+impl std::fmt::Display for VucLockState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Locked => write!(f, "locked"),
+            Self::Engineering => write!(f, "engineering"),
+            Self::Unlocked => write!(f, "unlocked"),
+            Self::NoLock => write!(f, "no lock"),
+        }
+    }
+}
 
 /// Phison ATA drive.
 trait Drive: Display {
@@ -32,14 +83,21 @@ impl dyn Drive + '_ {
         const DLMC_MIN_BLOCKS: u16 = 1;
 
         let is_ssd = identify.rotation_rate == Some(identify::RotationRate::NonRotating);
+
+        // SMART enabled with a command, so only check for enabled field's presence not
+        // value
         let has_smart = identify.features_supported.smart == Some(true)
             && identify.features_enabled.smart.is_some();
+
         let has_gpl = identify.features_supported.gpl == Some(true)
             && identify.features_enabled.gpl == Some(true);
+
         let id_has_phy_event_counters = identify
             .sata_capabilities
             .is_some_and(|x| x.phy_event_counters);
+
         let dlmc_min_blocks_match = matches!(identify.dlmc_min_blocks, Some(DLMC_MIN_BLOCKS));
+
         let valid =
             is_ssd && has_smart && has_gpl && id_has_phy_event_counters && dlmc_min_blocks_match;
 
@@ -151,7 +209,6 @@ impl dyn Drive + '_ {
             ..Default::default()
         };
 
-        debug!("[{self}] Executing VUC set AP key");
         self.ata()
             .command(registers, Transfer::None, false, false, None)?;
 
@@ -185,21 +242,8 @@ impl dyn Drive + '_ {
 
         self.vuc_set_ap_key()?;
 
-        let log_transfer = transfer.to_string();
-        debug!("[{self}] Executing VUC: {feature} (transfer: {log_transfer}, lba: {lba:#x})");
-
-        let result_registers =
-            self.ata()
-                .command(command_registers, transfer, false, false, None)?;
-
-        info!(
-            "[{self}] Executed VUC: {feature} (transfer: {log_transfer}, lba: {lba:#x}, result \
-             registers: {})",
-            match result_registers {
-                Some(x) => x.to_string(),
-                None => "N/A".into(),
-            }
-        );
+        self.ata()
+            .command(command_registers, transfer, false, false, None)?;
 
         Ok(())
     }

@@ -1,7 +1,10 @@
 //! S10 controller.
 
-use log::debug;
+use std::num::NonZero;
 
+use log::{debug, info};
+
+use super::VucLockState;
 use crate::{
     drive,
     protocol::{
@@ -10,20 +13,27 @@ use crate::{
     },
 };
 
+/// Display name of drive type.
+const DISPLAY_NAME: &str = "Phison S10";
+
 /// S10 error.
 #[derive(Debug)]
 enum Error {
     /// ATA error.
     Ata(ata::Error),
-    /// Invalid VUC system info data.
+    /// Invalid system info data.
     InvalidSystemInfo,
+    /// Invalid info block data.
+    InvalidInfoBlock,
+    /// Invalid firmware flash header data.
+    InvalidFirmwareFlashHeader,
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Ata(x) => Some(x),
-            Self::InvalidSystemInfo => None,
+            _ => None,
         }
     }
 }
@@ -33,11 +43,17 @@ impl std::fmt::Display for Error {
         match self {
             Self::Ata(_) => write!(f, "ATA error"),
             Self::InvalidSystemInfo => write!(f, "invalid system info"),
+            Self::InvalidInfoBlock => write!(f, "invalid info block"),
+            Self::InvalidFirmwareFlashHeader => write!(f, "invalid firmware flash header"),
         }
     }
 }
 
-impl drive::VendorError for Error {}
+impl drive::VendorError for Error {
+    fn name(&self) -> &str {
+        DISPLAY_NAME
+    }
+}
 
 impl From<ata::Error> for Error {
     fn from(value: ata::Error) -> Self {
@@ -49,16 +65,30 @@ impl From<Error> for drive::Error {
     fn from(value: Error) -> Self {
         match value {
             Error::Ata(x) => Self::Ata(x),
-            x @ Error::InvalidSystemInfo => Self::Vendor(Box::new(x)),
+            x => Self::Vendor(Box::new(x)),
         }
     }
 }
 
 /// VUC operation in feature register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VucFeature {
+enum VucOperation {
     /// Read system information.
     SystemInfo = 0x13,
+    /// Read drive info block (configuration data).
+    ReadInfoBlock = 0x28,
+    /// Read installed firmware (intended for verifying firmware flashing).
+    VerifyFlash = 0x31,
+}
+
+impl std::fmt::Display for VucOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SystemInfo => write!(f, "system info"),
+            Self::ReadInfoBlock => write!(f, "read info block"),
+            Self::VerifyFlash => write!(f, "verify flash"),
+        }
+    }
 }
 
 /// VUC system info result.
@@ -82,10 +112,16 @@ struct SystemInfo {
     ce_bitmap: u64,
     /// DRAM size in MB.
     dram_size: u16,
+    /// VUC lock state.
+    vuc_lock_state: Option<VucLockState>,
+    /// VUC lock key ID.
+    vuc_lock_key: Option<NonZero<u16>>,
     /// Firmware build date.
     firmware_date: String,
-    /// Firmware sub-version revision.
-    firmware_revision: String,
+    /// Firmware sub-version.
+    firmware_subversion: String,
+    /// VUC lock has a key configured.
+    vuc_lock_key_set: bool,
 }
 
 impl SystemInfo {
@@ -125,6 +161,9 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
 
         let dram_size = u16::from_le_bytes([data[70], data[71]]) >> 4;
 
+        let vuc_lock_state = VucLockState::parse(data[248]).or(Err(Error::InvalidSystemInfo))?;
+        let vuc_lock_key = NonZero::new(u16::from_be_bytes([data[250], data[251]]));
+
         let mut firmware_info: [_; 8] = std::array::from_fn(|x| data[256 + x]);
         firmware_info.reverse();
 
@@ -140,11 +179,13 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
             &firmware_date[4..]
         );
 
-        let firmware_revision = &firmware_info[6..];
-        if !firmware_revision.iter().all(u8::is_ascii_alphanumeric) {
+        let firmware_subversion = &firmware_info[6..];
+        if !firmware_subversion.iter().all(u8::is_ascii_alphanumeric) {
             return Err(Error::InvalidSystemInfo);
         }
-        let firmware_revision = str::from_utf8(firmware_revision).unwrap().into();
+        let firmware_subversion = str::from_utf8(firmware_subversion).unwrap().into();
+
+        let vuc_lock_key_set = (data[367] & (1 << 2)) != 0;
 
         Ok(Self {
             ce_count,
@@ -156,8 +197,85 @@ impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
             die_stride,
             ce_bitmap,
             dram_size,
+            vuc_lock_state,
+            vuc_lock_key,
             firmware_date,
-            firmware_revision,
+            firmware_subversion,
+            vuc_lock_key_set,
+        })
+    }
+}
+
+/// Info block (drive configuration).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InfoBlock {
+    /// Serial number.
+    serial: String,
+    /// Model.
+    model: String,
+}
+
+impl InfoBlock {
+    /// Size in bytes.
+    const SIZE: usize = SECTOR_SIZE;
+}
+
+impl TryFrom<&[u8; Self::SIZE]> for InfoBlock {
+    type Error = Error;
+
+    fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
+        if !data.starts_with(super::INFO_BLOCK_MAGIC) {
+            return Err(Error::InvalidInfoBlock);
+        }
+
+        let serial = identify::parse_string(&data[16..36]).or(Err(Error::InvalidInfoBlock))?;
+        let model = identify::parse_string(&data[36..76]).or(Err(Error::InvalidInfoBlock))?;
+
+        Ok(Self { serial, model })
+    }
+}
+
+/// Firmware header stored on flash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FirmwareFlashHeader {
+    /// Firmware version.
+    version: String,
+    /// Size of each section in sectors.
+    section_sector_counts: [u16; Self::SECTION_COUNT],
+}
+
+impl FirmwareFlashHeader {
+    /// Number of sections.
+    const SECTION_COUNT: usize = 16;
+    /// Size in bytes.
+    const SIZE: usize = 4096;
+}
+
+impl TryFrom<&[u8; Self::SIZE]> for FirmwareFlashHeader {
+    type Error = Error;
+
+    fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
+        const MAGIC: &[u8] = b"ID";
+
+        if !data.starts_with(MAGIC) {
+            return Err(Error::InvalidFirmwareFlashHeader);
+        }
+
+        let version = &data[8..16];
+        let version = version
+            .iter()
+            .all(u8::is_ascii_graphic)
+            .then(|| std::str::from_utf8(version).unwrap().to_string())
+            .ok_or(Error::InvalidFirmwareFlashHeader)?;
+
+        let section_sector_counts = std::array::from_fn(|x| {
+            let offset = 416 + x * size_of::<u16>();
+            u16::from_le_bytes([data[offset], data[offset + 1]])
+        });
+
+        Ok(Self {
+            version,
+            section_sector_counts,
         })
     }
 }
@@ -234,20 +352,59 @@ impl Drive<'_> {
     }
 
     /// Execute VUC.
-    fn vuc(self, transfer: Transfer, feature: VucFeature, lba: u32) -> Result<(), ata::Error> {
-        (&self as &dyn super::Drive).vuc(transfer, feature as _, lba)
+    fn vuc(self, transfer: Transfer, operation: VucOperation, lba: u32) -> Result<(), ata::Error> {
+        let log_info = format!("{operation} (transfer: {transfer}, lba: {lba:#x})");
+        debug!("[{self}] Executing VUC: {log_info}");
+
+        (&self as &dyn super::Drive).vuc(transfer, operation as _, lba)?;
+
+        info!("[{self}] Executed VUC: {log_info}");
+
+        Ok(())
     }
 
     /// VUC system info.
     fn vuc_system_info(self) -> Result<SystemInfo, Error> {
         let mut data = [0u8; SystemInfo::SIZE];
 
-        self.vuc(Transfer::Read(&mut data), VucFeature::SystemInfo, 0)?;
+        self.vuc(Transfer::Read(&mut data), VucOperation::SystemInfo, 0)?;
 
         let system_info = (&data).try_into()?;
         debug!("[{self}] System info: {system_info:?}");
 
         Ok(system_info)
+    }
+
+    /// VUC read info block.
+    fn vuc_read_info_block(self) -> Result<InfoBlock, Error> {
+        let mut data = [0u8; InfoBlock::SIZE];
+
+        self.vuc(Transfer::Read(&mut data), VucOperation::ReadInfoBlock, 0)?;
+        let info_block = (&data).try_into()?;
+
+        debug!("[{self}] Info block: {info_block:?}");
+
+        Ok(info_block)
+    }
+
+    /// VUC verify flash.
+    fn vuc_verify_flash(self, data: &mut [u8], code: bool) -> Result<(), Error> {
+        let lba = u32::from(code) << 16;
+
+        self.vuc(Transfer::Read(data), VucOperation::VerifyFlash, lba)?;
+
+        Ok(())
+    }
+
+    /// Read firmware header from flash.
+    fn read_firmware_flash_header(self) -> Result<FirmwareFlashHeader, Error> {
+        let mut data = [0u8; FirmwareFlashHeader::SIZE];
+        self.vuc_verify_flash(&mut data, false)?;
+
+        let flash_header = (&data).try_into()?;
+        debug!("[{self}] Firmware flash header: {flash_header:?}");
+
+        Ok(flash_header)
     }
 }
 
@@ -259,18 +416,58 @@ impl super::Drive for Drive<'_> {
 
 impl std::fmt::Display for Drive<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Phison S10 {}", self.ata.path().display())
+        write!(f, "{DISPLAY_NAME} {}", self.ata.path().display())
     }
 }
 
 /// S10 vendor type.
 pub struct VendorType;
 
+impl VendorType {
+    /// Check read info block.
+    fn check_read_info_block(drive: Drive) -> drive::CheckResult {
+        let read_info_block_result = drive.vuc_read_info_block();
+        debug!("[{drive}] Read info block: {read_info_block_result:?}");
+
+        let result = match read_info_block_result {
+            Ok(x) => Ok(format!("(serial: {}, model: {})", x.serial, x.model)),
+            Err(x) => Err(x.into()),
+        };
+
+        drive::CheckResult {
+            name: "Read info block".into(),
+            result,
+        }
+    }
+
+    /// Check read firmware.
+    fn check_read_firmware(drive: Drive) -> drive::CheckResult {
+        let read_firmware_result = drive.read_firmware_flash_header();
+        debug!("[{drive}] Read firmware flash header: {read_firmware_result:?}");
+
+        let result = match read_firmware_result {
+            Ok(x) => Ok(format!(
+                "{} (section sizes: {})",
+                x.version,
+                x.section_sector_counts
+                    .iter()
+                    .map(|&x| ((x as usize) * SECTOR_SIZE).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Err(x) => Err(x.into()),
+        };
+
+        drive::CheckResult {
+            name: "Read firmware".into(),
+            result,
+        }
+    }
+}
+
 impl drive::VendorType for VendorType {
     fn name(&self) -> &str {
-        const NAME: &str = "Phison S10";
-
-        NAME
+        DISPLAY_NAME
     }
 
     /// Run checks on drive.
@@ -292,21 +489,34 @@ impl drive::VendorType for VendorType {
         let system_info = drive.vuc_system_info()?;
 
         // VUC System Info part of the validation checks, assume it always succeeds
-        results.push(drive::CheckResult {
-            name: "System info".into(),
-            result: format!(
-                "(firmware: {} ({}), DRAM: {} MB, channels: {}. CEs: {}, blocks per CE: {}, pages \
-                 per block: {}, sectors per page: {})",
-                system_info.firmware_revision,
+        results.push(drive::CheckResult::new(
+            "System info".into(),
+            Ok(format!(
+                "(firmware: {} ({}), VUC lock: {}, DRAM: {} MB, channels: {}. CEs: {}, blocks per \
+                 CE: {}, pages per block: {}, sectors per page: {})",
+                system_info.firmware_subversion,
                 system_info.firmware_date,
+                system_info
+                    .vuc_lock_state
+                    .as_ref()
+                    .map_or("N/A".into(), ToString::to_string),
                 system_info.dram_size,
                 system_info.channel_count,
                 system_info.ce_count,
                 system_info.blocks_per_ce,
                 system_info.pages_per_block,
                 system_info.sectors_per_page
-            ),
-        });
+            )),
+        ));
+
+        if matches!(
+            system_info.vuc_lock_state,
+            None | Some(VucLockState::Unlocked | VucLockState::NoLock)
+        ) {
+            // Only run other checks if VUCs unlocked
+            results.push(Self::check_read_info_block(drive));
+            results.push(Self::check_read_firmware(drive));
+        }
 
         Ok(Some(results.into()))
     }
@@ -358,6 +568,40 @@ mod tests {
 
         for &data in DATA_INVALID {
             assert!(SystemInfo::try_from(data).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_info_block() {
+        const DATA_VALID: &[&[u8; InfoBlock::SIZE]] = &[
+            test_data::patriot_blast::INFO_BLOCK,
+            test_data::ocz_trion150::INFO_BLOCK,
+        ];
+        const DATA_INVALID: &[&[u8; InfoBlock::SIZE]] = &[&[0; _], &[0xFF; _]];
+
+        for &data in DATA_VALID {
+            assert!(InfoBlock::try_from(data).is_ok());
+        }
+
+        for &data in DATA_INVALID {
+            assert!(InfoBlock::try_from(data).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_firmware_flash_header() {
+        const DATA_VALID: &[&[u8; FirmwareFlashHeader::SIZE]] = &[
+            test_data::patriot_blast::FIRMWARE_FLASH_HEADER,
+            test_data::ocz_trion150::FIRMWARE_FLASH_HEADER,
+        ];
+        const DATA_INVALID: &[&[u8; FirmwareFlashHeader::SIZE]] = &[&[0; _], &[0xFF; _]];
+
+        for &data in DATA_VALID {
+            assert!(FirmwareFlashHeader::try_from(data).is_ok());
+        }
+
+        for &data in DATA_INVALID {
+            assert!(FirmwareFlashHeader::try_from(data).is_err());
         }
     }
 }

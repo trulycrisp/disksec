@@ -5,7 +5,7 @@ pub mod asc;
 
 use std::num::NonZero;
 
-use crate::protocol::ata;
+use crate::{output, protocol::ata};
 
 /// Sense error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,7 +206,6 @@ pub struct AtaReturnFixed {
 }
 
 /// Fixed-format sense data.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedSense {
     /// Raw bytes.
@@ -335,21 +334,14 @@ impl FixedSense {
 
 impl std::fmt::Display for FixedSense {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            &self
-                .raw
-                .iter()
-                .map(|x| format!("{x:02x}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
+        write!(f, "{}", output::format_bytes(&self.raw))
     }
 }
 
 /// Descriptor type codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorType {
-    /// SAT ATA Return descriptor.
+    /// SAT ATA return descriptor.
     AtaReturn = 0x9,
 }
 
@@ -504,14 +496,7 @@ impl DescriptorSense {
 
 impl std::fmt::Display for DescriptorSense {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            &self
-                .raw
-                .iter()
-                .map(|x| format!("{x:02x}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
+        write!(f, "{}", crate::output::format_bytes(&self.raw))
     }
 }
 

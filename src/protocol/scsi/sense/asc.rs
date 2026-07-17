@@ -1,5 +1,6 @@
 //! Additional Sense Code (ASC/ASCQ) parsing.
 
+/// ASC/ASCQ combination.
 #[allow(clippy::missing_docs_in_private_items)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdditionalSenseCode {
@@ -774,8 +775,7 @@ pub enum AdditionalSenseCode {
 }
 
 impl AdditionalSenseCode {
-    /// Decodes the ASC and ASCQ sense bytes into a variant; unrecognized pairs
-    /// fall through to `Reserved(asc, ascq)`.
+    /// Parse ASC/ASCQ values.
     #[allow(clippy::too_many_lines)]
     pub fn parse(asc: u8, ascq: u8) -> Self {
         match (asc, ascq) {
@@ -1556,8 +1556,6 @@ impl AdditionalSenseCode {
 }
 
 impl std::fmt::Display for AdditionalSenseCode {
-    /// Writes the spec's human-readable description for the condition (e.g.
-    /// "LOGICAL UNIT NOT READY, FORMAT IN PROGRESS").
     #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

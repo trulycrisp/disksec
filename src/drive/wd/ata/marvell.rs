@@ -3,6 +3,10 @@
 use log::{debug, info};
 
 use crate::{
+    cpu::{
+        VECTOR_TABLE_SIZE,
+        arm32::{self, INSTRUCTION_SIZE},
+    },
     drive,
     protocol::{
         Transfer,
@@ -14,10 +18,10 @@ use crate::{
     },
 };
 
-/// Memory address of ARM exception vector.
-const EXCEPTION_VECTOR_ADDRESS: u32 = 0;
-/// ARM 32-bit instruction size.
-const INSTRUCTION_SIZE: usize = 4;
+/// Display name of drive type.
+const DISPLAY_NAME: &str = "Western Digital Marvell";
+/// Memory address of ARM exception vector table.
+const EXCEPTION_VECTOR_TABLE_ADDRESS: u32 = 0;
 
 /// Marvell error.
 #[derive(Debug)]
@@ -30,8 +34,8 @@ enum Error {
     InvalidFileDirectory,
     /// Invalid VUC native information data.
     InvalidNativeInfo,
-    /// Invalid exception vector data in memory.
-    InvalidExceptionVector,
+    /// Invalid exception vector table data in memory.
+    InvalidExceptionVectorTable,
 }
 
 impl std::error::Error for Error {
@@ -49,13 +53,17 @@ impl std::fmt::Display for Error {
             Self::Ata(_) => write!(f, "ATA error"),
             Self::InvalidFileHeader => write!(f, "invalid file header"),
             Self::InvalidFileDirectory => write!(f, "invalid file directory"),
-            Self::InvalidNativeInfo => write!(f, "invalid native info"),
-            Self::InvalidExceptionVector => write!(f, "invalid ARM exception vector"),
+            Self::InvalidNativeInfo => write!(f, "invalid native information"),
+            Self::InvalidExceptionVectorTable => write!(f, "invalid ARM exception vector table"),
         }
     }
 }
 
-impl drive::VendorError for Error {}
+impl drive::VendorError for Error {
+    fn name(&self) -> &str {
+        DISPLAY_NAME
+    }
+}
 
 impl From<ata::Error> for Error {
     fn from(value: ata::Error) -> Self {
@@ -98,8 +106,6 @@ impl std::fmt::Display for VucAction {
 enum VucFunction {
     /// Read data.
     Read = 1,
-    /// Write data.
-    Write = 2,
 }
 
 /// Header of file (system area module).
@@ -205,6 +211,9 @@ impl TryFrom<&File> for FileDirectory {
             .split_first_chunk::<{ size_of::<u16>() }>()
             .ok_or(Error::InvalidFileDirectory)?;
         let entry_count = u16::from_le_bytes(*entry_count) as usize;
+        if entry_count == 0 {
+            return Err(Error::InvalidFileDirectory);
+        }
 
         // Get entry size from first entry
         let entry_size = *data.first().ok_or(Error::InvalidFileDirectory)? as _;
@@ -506,36 +515,13 @@ impl Drive<'_> {
         Ok(())
     }
 
-    /// Check data is an ARM exception vector.
-    fn is_exception_vector(data: &[u8; SECTOR_SIZE]) -> bool {
-        const LDR_PC: &[u8; INSTRUCTION_SIZE] = &[0x0, 0xF0, 0x9F, 0xE5];
-        const LDR_PC_MASK: &[u8; INSTRUCTION_SIZE] = &[0x0, 0xFF, 0xFF, 0xFF];
-        const INSTRUCTION_COUNT: usize = 3;
-
-        for instruction_index in 0..INSTRUCTION_COUNT {
-            let instruction_offset = instruction_index * INSTRUCTION_SIZE;
-            let instruction = &data[instruction_offset..instruction_offset + INSTRUCTION_SIZE];
-
-            if instruction
-                .iter()
-                .zip(LDR_PC)
-                .zip(LDR_PC_MASK)
-                .any(|((x, y), m)| x & m != y & m)
-            {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Read ARM exception vector from controller memory.
-    fn read_exception_vector(self) -> Result<[u8; SECTOR_SIZE], Error> {
+    /// Read ARM exception vector table from controller memory.
+    fn read_exception_vector_table(self) -> Result<[u8; VECTOR_TABLE_SIZE], Error> {
         let mut data = [0; _];
-        self.read_memory(EXCEPTION_VECTOR_ADDRESS, &mut data)?;
+        self.read_memory(EXCEPTION_VECTOR_TABLE_ADDRESS, &mut data)?;
 
-        if !Self::is_exception_vector(&data) {
-            return Err(Error::InvalidExceptionVector);
+        if !arm32::is_exception_vector_table(&data) {
+            return Err(Error::InvalidExceptionVectorTable);
         }
 
         Ok(data)
@@ -544,7 +530,7 @@ impl Drive<'_> {
 
 impl std::fmt::Display for Drive<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Western Digital Marvell {}", self.ata.path().display())
+        write!(f, "{DISPLAY_NAME} {}", self.ata.path().display())
     }
 }
 
@@ -555,56 +541,49 @@ impl VendorType {
     /// Check VUC native information table.
     fn check_native_info(drive: Drive) -> drive::CheckResult {
         let result = match drive.native_info() {
-            Ok(x) => format!(
-                "Success (firmware: (controller: {}, servo: {}, overlay: {}, read channel: {}), \
-                 DCM: {}, manufacture date: {})",
+            Ok(x) => Ok(format!(
+                "(firmware: (controller: {}, servo: {}, overlay: {}, read channel: {}), DCM: {}, \
+                 manufacture date: {})",
                 x.controller_firmware,
                 x.servo_firmware,
                 x.overlay_firmware,
                 x.read_channel_firmware,
                 x.drive_config_matrix,
                 x.manufacture_date
-            ),
-            Err(x) => format!("Fail ({x})"),
+            )),
+            Err(x) => Err(x.into()),
         };
 
-        drive::CheckResult {
-            name: "Native information".into(),
-            result,
-        }
+        drive::CheckResult::new("Native information".into(), result)
     }
 
     /// Check read system area.
     fn check_read_sa(drive: Drive) -> drive::CheckResult {
         let result = match drive.read_file_directory() {
-            Ok(x) => format!("Success ({} modules)", x.entries.len()),
-            Err(x) => format!("Fail ({x})"),
+            Ok(x) => Ok(format!("{} modules", x.entries.len())),
+            Err(x) => Err(x.into()),
         };
 
-        drive::CheckResult {
-            name: "Read system area".into(),
-            result,
-        }
+        drive::CheckResult::new("Read system area".into(), result)
     }
 
     /// Check read controller memory.
     fn check_read_memory(drive: Drive) -> drive::CheckResult {
-        let result = match drive.read_exception_vector() {
-            Ok(_) => format!("Success (ARM exception vector at {EXCEPTION_VECTOR_ADDRESS:#010x})"),
-            Err(x) => format!("Fail ({x})"),
+        let result = match drive.read_exception_vector_table() {
+            Ok(_) => Ok(format!(
+                "ARM exception vector table at {EXCEPTION_VECTOR_TABLE_ADDRESS:#010x}"
+            )),
+            Err(x) => Err(x.into()),
         };
 
-        drive::CheckResult {
-            name: "Read memory".into(),
-            result,
-        }
+        drive::CheckResult::new("Read memory".into(), result)
     }
 
     /// Check for IRATEMONK infection, implements the same logic `nls_933w.dll`
     /// uses to locate implant data storage.
     fn check_iratemonk(drive: Drive) -> drive::CheckResult {
         const RESERVED_VECTOR_OFFSET: usize = 5 * INSTRUCTION_SIZE;
-        const FIQ_VECTOR_OFFSET: usize = 28;
+        const FIQ_VECTOR_OFFSET: usize = 7 * INSTRUCTION_SIZE;
         const MOV_R0_R0: [u8; INSTRUCTION_SIZE] = [0x0, 0x0, 0xA0, 0xE1]; // mov r0, r0
         const MOV_R1_R1: [u8; INSTRUCTION_SIZE] = [0x1, 0x10, 0xA0, 0xE1]; // mov r1, r1
         const MOV_R2_R2: [u8; INSTRUCTION_SIZE] = [0x2, 0x20, 0xA0, 0xE1]; // mov r2, r2
@@ -615,50 +594,49 @@ impl VendorType {
             name: "IRATEMONK".into(),
             result: x,
         };
-        let result_not_found = "Infection not found".to_string();
+        let result_not_found = Ok("Infection not found".to_string());
 
-        let data = match drive.read_exception_vector() {
+        let data = match drive.read_exception_vector_table() {
             Ok(x) => x,
-            Err(x) => return result(format!("Fail ({x})")),
+            Err(x) => return result(Err(x.into())),
         };
 
         let reserved_vector = std::array::from_fn(|x| data[RESERVED_VECTOR_OFFSET + x]);
         let fiq_vector = std::array::from_fn(|x| data[FIQ_VECTOR_OFFSET + x]);
 
-        let chs_packed_offset;
-        if reserved_vector == MOV_R0_R0 && fiq_vector == LDR_PC_18H {
-            chs_packed_offset = 52;
+        let chs_packed_offset = if reserved_vector == MOV_R0_R0 && fiq_vector == LDR_PC_18H {
+            52
         } else if reserved_vector == MOV_R1_R1 {
-            chs_packed_offset = 60;
+            60
         } else if reserved_vector == MOV_R2_R2 {
-            chs_packed_offset = 180;
+            180
         } else if reserved_vector == MOV_R3_R3 {
-            chs_packed_offset = 92;
+            92
         } else {
             return result(result_not_found);
-        }
+        };
 
         let chs_packed = u32::from_le_bytes(std::array::from_fn(|x| data[chs_packed_offset + x]));
         debug!("[{drive}] IRATEMONK packed CHS {chs_packed:#x} (offset: {chs_packed_offset})");
-
-        // Valid packed CHS must have high bit set
-        if chs_packed & (1 << 31) == 0 {
-            return result(result_not_found);
-        }
 
         let cylinder = chs_packed.cast_signed() >> 15;
         let head = ((chs_packed >> 12) & 0b111) as u8;
         let sector = (chs_packed & 0xFFF) as u16;
 
-        result(format!("INFECTED (data C/H/S: {cylinder}/{head}/{sector})"))
+        // Valid system area address always has a negative cylinder
+        if cylinder >= 0 {
+            return result(result_not_found);
+        }
+
+        result(Ok(format!(
+            "INFECTED (data C/H/S: {cylinder}/{head}/{sector})"
+        )))
     }
 }
 
 impl drive::VendorType for VendorType {
     fn name(&self) -> &str {
-        const NAME: &str = "Western Digital Marvell";
-
-        NAME
+        DISPLAY_NAME
     }
 
     fn check(
@@ -724,11 +702,11 @@ mod tests {
 
     #[test]
     fn parse_native_info() {
-        const DATA_VALID: &[&[u8; identify::IdentifyDevice::SIZE]] = &[
+        const DATA_VALID: &[&[u8; NativeInfo::SIZE]] = &[
             test_data::westerndigital_scorpioblack::NATIVE_INFO,
             test_data::westerndigital_bluemobile::NATIVE_INFO,
         ];
-        const DATA_INVALID: &[&[u8; identify::IdentifyDevice::SIZE]] = &[&[0; _], &[0xFF; _]];
+        const DATA_INVALID: &[&[u8; NativeInfo::SIZE]] = &[&[0; _], &[0xFF; _]];
 
         for &data in DATA_VALID {
             assert!(NativeInfo::try_from(data).is_ok());
@@ -776,23 +754,6 @@ mod tests {
 
         for &data in DATA_INVALID {
             assert!(FileDirectory::try_from(data.as_slice()).is_err());
-        }
-    }
-
-    #[test]
-    fn is_exception_vector() {
-        const DATA_VALID: &[&[u8; SECTOR_SIZE]] = &[
-            test_data::westerndigital_scorpioblack::EXCEPTION_VECTOR,
-            test_data::westerndigital_bluemobile::EXCEPTION_VECTOR,
-        ];
-        const DATA_INVALID: &[&[u8; SECTOR_SIZE]] = &[&[0; _], &[0xFF; _]];
-
-        for &data in DATA_VALID {
-            assert!(Drive::is_exception_vector(data));
-        }
-
-        for &data in DATA_INVALID {
-            assert!(!Drive::is_exception_vector(data));
         }
     }
 }

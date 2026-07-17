@@ -88,7 +88,7 @@ impl From<&Dfb<'_>> for Box<[u8]> {
 pub struct DitsDsb<'a> {
     /// SCSI sense key.
     pub sense_key: sense::SenseKey,
-    /// SCSI Additional sense code/qualifier.
+    /// SCSI ASC/ASCQ.
     pub asc: sense::asc::AdditionalSenseCode,
     /// Function-specific status data.
     pub data: &'a [u8],

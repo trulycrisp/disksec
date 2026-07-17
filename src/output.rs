@@ -1,4 +1,5 @@
 //! High-level user-facing output functionality.
+
 use std::{io, path::Path};
 
 use crate::drive;
@@ -12,6 +13,14 @@ pub fn format_error(mut error: &dyn std::error::Error) -> String {
         error = source;
     }
     string
+}
+
+/// Display byte slice as hex.
+pub fn format_bytes(data: &[u8]) -> String {
+    data.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Write output header.
@@ -79,7 +88,14 @@ fn run_drive(drive: &drive::Drive, output: &mut dyn io::Write) -> io::Result<()>
         }
 
         for check_result in vendor_result.results {
-            writeln!(output, "\t\t{}: {}", check_result.name, check_result.result)?;
+            writeln!(
+                output,
+                "\t\t{}: {}",
+                check_result.name,
+                check_result
+                    .result
+                    .unwrap_or_else(|x| format!("Error ({})", format_error(&x)))
+            )?;
         }
     }
 

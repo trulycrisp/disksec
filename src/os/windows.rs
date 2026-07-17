@@ -1,7 +1,5 @@
 //! Windows OS interface.
 
-#![cfg(windows)]
-
 pub mod scsi;
 
 use std::{ffi::c_void, fs::File, os::windows::io::AsRawHandle, path::PathBuf};

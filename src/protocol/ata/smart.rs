@@ -169,7 +169,6 @@ impl TryFrom<u8> for SelfTestExecutionStatus {
 }
 
 /// Off-line data collection capability field of SMART data.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OfflineDataCollectionCapability {
     /// Selective self-test routine is supported.
@@ -321,7 +320,7 @@ mod tests {
     use crate::test_data;
 
     #[test]
-    fn parse_smart_directory() {
+    fn parse_smart_data() {
         const DATA_VALID: &[&[u8; Smart::SIZE]] = &[
             test_data::westerndigital_scorpioblack::SMART_DATA,
             test_data::kingston_a400::SMART_DATA,

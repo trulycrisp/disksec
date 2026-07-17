@@ -292,7 +292,6 @@ impl TryFrom<u8> for TpgSupport {
 }
 
 /// INQUIRY command response.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inquiry {
     /// Whether a device is connected to this logical unit.
@@ -426,7 +425,9 @@ impl TryFrom<&[u8]> for Inquiry {
         let version_descriptors = data
             .get(58..)
             .unwrap_or_default()
-            .chunks_exact(size_of::<u16>())
+            .as_chunks::<{ size_of::<u16>() }>()
+            .0
+            .iter()
             .take(8)
             .map(|x| u16::from_be_bytes([x[0], x[1]]))
             .filter(|&x| x != 0)

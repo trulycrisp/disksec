@@ -1,7 +1,5 @@
 //! Linux OS interface.
 
-#![cfg(target_os = "linux")]
-
 pub mod scsi;
 
 use std::{

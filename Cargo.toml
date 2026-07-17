@@ -1,7 +1,7 @@
 [package]
 name = "disksec"
 description = "Storage drive firmware security assessment"
-version = "0.1.0"
+version = "0.2.0"
 repository = "https://github.com/trulycrisp/disksec"
 keywords = ["drive", "disk", "storage", "security", "firmware"]
 categories = ["command-line-utilities", "hardware-support"]
@@ -19,3 +19,5 @@ missing_docs = "warn"
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 missing_docs_in_private_items = "warn"
+similar_names = "allow"
+struct_excessive_bools = "allow"

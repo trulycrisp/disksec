@@ -14,5 +14,5 @@ pub(crate) const GP_LOG_11H: &[u8; 512] = include_bytes!("gp_log_11h.bin");
 pub(crate) const NATIVE_INFO: &[u8; 512] = include_bytes!("native_info.bin");
 /// System area file ID 0x1 (directory).
 pub(crate) const FILE_1H: &[u8; 12_288] = include_bytes!("file_1h.bin");
-/// Exception vector in memory.
-pub(crate) const EXCEPTION_VECTOR: &[u8; 512] = include_bytes!("exception_vector.bin");
+/// CPU exception vector table in memory.
+pub(crate) const EXCEPTION_VECTOR_TABLE: &[u8; 512] = include_bytes!("exception_vector_table.bin");

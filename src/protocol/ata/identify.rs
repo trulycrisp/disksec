@@ -26,14 +26,7 @@ impl std::error::Error for Error {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::String(x) => write!(
-                f,
-                "invalid string {}",
-                x.iter()
-                    .map(|x| format!("{x:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
+            Self::String(x) => write!(f, "invalid string {}", crate::output::format_bytes(x)),
             Self::ZonedCapabilities(x) => {
                 write!(f, "invalid zoned capabilities {x:#x}")
             },
@@ -53,7 +46,13 @@ impl std::fmt::Display for Error {
 
 /// Swap the bytes of every 16-bit word.
 fn swap_word_bytes(data: &[u8]) -> Box<[u8]> {
-    data.chunks_exact(2).flat_map(|c| [c[1], c[0]]).collect()
+    const WORD_SIZE: usize = size_of::<u16>();
+
+    data.as_chunks::<WORD_SIZE>()
+        .0
+        .iter()
+        .flat_map(|c| [c[1], c[0]])
+        .collect()
 }
 
 /// Parse a string field.
@@ -104,7 +103,6 @@ impl ZonedCapabilities {
 }
 
 /// Additional supported from word 69.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdditionalSupported {
     /// `CFast` feature set.
@@ -168,7 +166,6 @@ impl TryFrom<u16> for AdditionalSupported {
 }
 
 /// SATA capabilities from word 76.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SataCapabilities {
     /// READ LOG DMA EXT command.
@@ -221,7 +218,6 @@ impl SataCapabilities {
 }
 
 /// Major version (standards-conformance) from word 80.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MajorVersion {
     /// ACS-5.
@@ -680,7 +676,6 @@ impl std::fmt::Display for FormFactor {
 }
 
 /// SMART Command Transport supported, from word 206.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SctSupported {
     /// SCT data tables.

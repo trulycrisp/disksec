@@ -7,7 +7,7 @@ use crate::protocol::{Transfer, ata};
 enum OpCode {
     /// INQUIRY.
     Inquiry = 0x12,
-    /// SAT ATA PASS-THROUGH (16)
+    /// SAT ATA PASS-THROUGH (16).
     AtaPassThrough16 = 0x85,
 }
 
@@ -19,14 +19,7 @@ pub trait Cdb {
 
 impl std::fmt::Display for dyn Cdb + '_ {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            &self
-                .to_bytes()
-                .iter()
-                .map(|x| format!("{x:02x}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
+        write!(f, "{}", crate::output::format_bytes(&self.to_bytes()))
     }
 }
 
@@ -125,7 +118,6 @@ impl std::fmt::Display for SatTransferDirection {
 }
 
 /// SAT ATA PASS-THROUGH (16) CDB.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtaPassThrough16 {
     /// Data transfer protocol.
@@ -152,7 +144,7 @@ pub struct AtaPassThrough16 {
 }
 
 impl AtaPassThrough16 {
-    /// Contruct CDB.
+    /// Construct CDB.
     pub fn new(
         registers: ata::command::CommandRegisters,
         transfer: &Transfer,

@@ -1,6 +1,8 @@
 //! CLI entry point.
 
+mod cpu;
 mod drive;
+mod flash_id;
 mod os;
 mod output;
 mod protocol;

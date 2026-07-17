@@ -64,7 +64,7 @@ impl std::fmt::Display for Error {
             Self::Status(x) => write!(f, "status {x}"),
             Self::InvalidSense(_) => write!(f, "invalid sense"),
             Self::NoSense => write!(f, "{} no sense", Status::CheckCondition),
-            Self::Sense(x) => x.fmt(f),
+            Self::Sense(x) => write!(f, "sense {x}"),
             Self::Inquiry(_) => write!(f, "inquiry error"),
         }
     }
