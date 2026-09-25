@@ -10,8 +10,8 @@ pub(crate) const SMART_LOG_0H: &[u8; 512] = include_bytes!("smart_log_0h.bin");
 pub(crate) const GP_LOG_0H: &[u8; 512] = include_bytes!("gp_log_0h.bin");
 /// GPL log 0x11 (SATA PHY event counters).
 pub(crate) const GP_LOG_11H: &[u8; 512] = include_bytes!("gp_log_11h.bin");
-/// VUC native information response.
-pub(crate) const NATIVE_INFO: &[u8; 512] = include_bytes!("native_info.bin");
+/// VUC physical parameters table.
+pub(crate) const PHYSICAL_PARAMETERS: &[u8; 512] = include_bytes!("physical_parameters.bin");
 /// System area file ID 0x1 (directory).
 pub(crate) const FILE_1H: &[u8; 12_288] = include_bytes!("file_1h.bin");
 /// CPU exception vector table in memory.

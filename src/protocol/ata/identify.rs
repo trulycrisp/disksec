@@ -2,7 +2,7 @@
 
 use std::ops::RangeInclusive;
 
-use crate::protocol::ata::SECTOR_SIZE;
+use crate::{output, protocol::ata::SECTOR_SIZE};
 
 /// Identify device error.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ impl std::error::Error for Error {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::String(x) => write!(f, "invalid string {}", crate::output::format_bytes(x)),
+            Self::String(x) => write!(f, "invalid string {}", output::format_bytes_hex(x)),
             Self::ZonedCapabilities(x) => {
                 write!(f, "invalid zoned capabilities {x:#x}")
             },
@@ -57,25 +57,24 @@ fn swap_word_bytes(data: &[u8]) -> Box<[u8]> {
 
 /// Parse a string field.
 pub fn parse_string(data: &[u8]) -> Result<String, Error> {
-    if !data.len().is_multiple_of(2) {
-        return Err(Error::String(data.into()));
+    let error = || Error::String(data.into());
+
+    // Identify strings must have a word-aligned size
+    if !data.len().is_multiple_of(size_of::<u16>()) {
+        return Err(error());
     }
 
-    let data = swap_word_bytes(data);
-
-    let Ok(string) = str::from_utf8(&data) else {
-        return Err(Error::String(data));
+    let swapped_data = swap_word_bytes(data);
+    let Ok(mut string) = str::from_utf8(&swapped_data) else {
+        return Err(error());
     };
 
-    // Trim trailing whitespace and null bytes. Not allowed in ACS, but some very
-    // old drives use null padding
-    let string = string.trim_end_matches(|x: char| x == '\0' || x.is_ascii_whitespace());
+    // Trim null terminator and trailing spaces. Null isn't allowed in ACS, but
+    // some old drives use it
+    string = string.split('\0').next().unwrap_or("").trim_end();
 
-    if !string
-        .chars()
-        .all(|x| x.is_ascii_graphic() || x.is_ascii_whitespace())
-    {
-        return Err(Error::String(data));
+    if !string.chars().all(|x| x == ' ' || x.is_ascii_graphic()) {
+        return Err(error());
     }
 
     Ok(string.into())
@@ -141,6 +140,7 @@ impl TryFrom<u16> for AdditionalSupported {
         let read_buffer_dma = (word69 & (1 << 11)) != 0;
         let write_buffer_dma = (word69 & (1 << 10)) != 0;
         let dlmc_dma = (word69 & (1 << 8)) != 0;
+        // 28-BIT SUPPORTED is set when the commands are not supported
         let optional_28bit = (word69 & (1 << 6)) == 0;
         let rzat = (word69 & (1 << 5)) != 0;
         let encrypted = (word69 & (1 << 4)) != 0;
@@ -248,7 +248,7 @@ pub struct MajorVersion {
 
 impl MajorVersion {
     /// Parse major version from word 80.
-    pub fn parse(word80: u16) -> Option<Self> {
+    pub(crate) fn parse(word80: u16) -> Option<Self> {
         if matches!(word80, 0 | 0xFFFF) {
             return None;
         }
@@ -524,7 +524,7 @@ pub struct SectorSize {
 
 impl SectorSize {
     /// Parse from word 106.
-    pub fn parse(word106: u16) -> Option<Self> {
+    pub(crate) fn parse(word106: u16) -> Option<Self> {
         if word106 >> 14 != 0b01 {
             return None;
         }
@@ -573,7 +573,7 @@ pub struct Wwn {
 
 impl Wwn {
     /// Size in bytes.
-    pub const SIZE: usize = 8;
+    pub(crate) const SIZE: usize = 8;
 
     /// Parse from raw bytes.
     fn parse(data: [u8; Self::SIZE]) -> Result<Self, Error> {
@@ -632,7 +632,7 @@ pub enum FormFactor {
 
 impl FormFactor {
     /// Parse from raw field.
-    pub fn parse(value: u8) -> Result<Option<Self>, Error> {
+    pub(crate) fn parse(value: u8) -> Result<Option<Self>, Error> {
         const VARIANTS: &[FormFactor] = &[
             FormFactor::Inch5_25,
             FormFactor::Inch3_5,
@@ -773,17 +773,17 @@ pub struct IdentifyDevice {
 
 impl IdentifyDevice {
     /// Size in bytes.
-    pub const SIZE: usize = SECTOR_SIZE;
+    pub(crate) const SIZE: usize = SECTOR_SIZE;
 
     /// Get correct user-addressable sector count from appropriate field.
-    pub fn sectors(&self) -> u64 {
+    pub(crate) fn sectors(&self) -> u64 {
         self.sectors_ext
             .or(self.sectors_48bit)
             .unwrap_or(self.sectors_28bit.into())
     }
 
     /// Get total user capacity in bytes.
-    pub fn capacity(&self) -> u64 {
+    pub(crate) fn capacity(&self) -> u64 {
         self.sectors().saturating_mul(self.logical_sector_size)
     }
 }
@@ -910,23 +910,6 @@ impl TryFrom<&[u8; IdentifyDevice::SIZE]> for IdentifyDevice {
     }
 }
 
-/// Display capacity in byte units.
-fn format_capacity(mut size: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
-    const STEP: u64 = 1000;
-
-    let mut remainder = 0;
-    let mut unit = 0;
-
-    while size >= STEP && unit < UNITS.len() - 1 {
-        remainder = size % STEP;
-        size /= STEP;
-        unit += 1;
-    }
-
-    format!("{size}.{:02} {}", remainder / 10, UNITS[unit])
-}
-
 impl std::fmt::Display for IdentifyDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let wwn = self
@@ -952,7 +935,7 @@ impl std::fmt::Display for IdentifyDevice {
             self.model.trim(),
             self.serial.trim(),
             self.firmware.trim(),
-            format_capacity(self.capacity()),
+            output::format_byte_size_decimal(self.capacity()),
         )
     }
 }

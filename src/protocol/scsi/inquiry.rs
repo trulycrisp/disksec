@@ -45,7 +45,7 @@ impl std::fmt::Display for Error {
             Self::InvalidTpgSupport(x) => {
                 write!(f, "invalid TPG support {x:#x}")
             },
-            Self::String(_) => write!(f, "invalid string"),
+            Self::String(x) => write!(f, "invalid string {}", crate::output::format_bytes_hex(x)),
         }
     }
 }
@@ -344,19 +344,19 @@ pub struct Inquiry {
 
 impl Inquiry {
     /// Maximum size in bytes.
-    pub const MAX_SIZE: usize = 260;
+    pub(crate) const MAX_SIZE: usize = 260;
 
     /// Parse string.
     fn parse_string(data: &[u8]) -> Result<String, Error> {
         let string = str::from_utf8(data).map_err(|_| Error::String(data.into()))?;
 
-        // Trim trailing whitespace and null bytes. Not standards-compliant, but some
-        // shitty devices null-pad strings
-        let string = string.trim_end_matches(|x: char| x == '\0' || x.is_ascii_whitespace());
+        // Trim at null terminator, and trailing spaces. Not standards-compliant,
+        // but some shitty devices null-pad strings
+        let string = string.split('\0').next().unwrap_or("").trim_end();
 
         if !string
             .chars()
-            .all(|x| x.is_ascii_graphic() || x.is_ascii_whitespace())
+            .all(|x| x == ' ' || x.is_ascii_graphic())
         {
             return Err(Error::String(data.into()));
         }
@@ -406,7 +406,7 @@ impl TryFrom<&[u8]> for Inquiry {
         if data_size < HEADER_SIZE {
             return Err(Error::Truncated);
         }
-        let data = data.get(..data_size).ok_or(Error::Truncated)?;
+        let data = &data[..data_size.min(data.len())];
 
         let scc_support = (header[5] & (1 << 7)) != 0;
         let tpg_support = TpgSupport::try_from((header[5] >> 4) & 0b11)?;

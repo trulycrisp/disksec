@@ -10,7 +10,7 @@ use log::debug;
 
 use crate::{
     os,
-    protocol::{ata, scsi},
+    protocol::{ata, nvme, scsi},
 };
 
 /// Drive error.
@@ -22,6 +22,8 @@ pub enum Error {
     Scsi(scsi::Error),
     /// ATA error.
     Ata(ata::Error),
+    /// NVMe error.
+    Nvme(nvme::Error),
     /// Not a valid/supported drive.
     InvalidDrive,
     /// Vendor-specific error.
@@ -34,6 +36,7 @@ impl std::error::Error for Error {
             Self::Os(x) => Some(x),
             Self::Scsi(x) => Some(x),
             Self::Ata(x) => Some(x),
+            Self::Nvme(x) => Some(x),
             Self::InvalidDrive => None,
             Self::Vendor(x) => Some(x.as_ref()),
         }
@@ -46,6 +49,7 @@ impl std::fmt::Display for Error {
             Self::Os(_) => write!(f, "OS error"),
             Self::Scsi(_) => write!(f, "SCSI error"),
             Self::Ata(_) => write!(f, "ATA error"),
+            Self::Nvme(_) => write!(f, "NVMe error"),
             Self::InvalidDrive => write!(f, "invalid drive"),
             Self::Vendor(x) => write!(f, "{} error", x.name()),
         }
@@ -70,8 +74,17 @@ impl From<scsi::Error> for Error {
 impl From<ata::Error> for Error {
     fn from(value: ata::Error) -> Self {
         match value {
-            ata::Error::Scsi(scsi::Error::Os(x)) => x.into(),
+            ata::Error::Os(x) | ata::Error::Scsi(scsi::Error::Os(x)) => x.into(),
             x => Self::Ata(x),
+        }
+    }
+}
+
+impl From<nvme::Error> for Error {
+    fn from(value: nvme::Error) -> Self {
+        match value {
+            nvme::Error::Os(x) => x.into(),
+            x => Self::Nvme(x),
         }
     }
 }
@@ -98,18 +111,32 @@ pub enum Drive {
     Scsi(scsi::Drive),
     /// ATA drive.
     Ata(ata::Drive),
+    /// NVMe drive.
+    Nvme(nvme::Drive),
 }
 
 impl Drive {
     /// Open drive.
-    pub fn open(path: &Path) -> Result<Self, Error> {
+    pub(crate) fn open(path: &Path) -> Result<Self, Error> {
         let opened = |x| {
             debug!("[{x}] Opened");
             Ok(x)
         };
 
+        match nvme::Drive::open(path) {
+            Ok(x) => return opened(x.into()),
+            Err(nvme::Error::UnsupportedDrive) => {},
+            Err(e) => return Err(e.into()),
+        }
+
+        match ata::Drive::open(path) {
+            Ok(x) => return opened(x.into()),
+            Err(ata::Error::UnsupportedDrive) => {},
+            Err(e) => return Err(e.into()),
+        }
+
         match scsi::Drive::open(path) {
-            Ok(x) => return opened(Self::try_from(x)?),
+            Ok(x) => return opened(x.into()),
             Err(scsi::Error::UnsupportedDrive) => {},
             Err(e) => return Err(e.into()),
         }
@@ -118,8 +145,8 @@ impl Drive {
     }
 
     /// Enumerate and open all available drives.
-    pub fn open_all() -> Result<impl Iterator<Item = OpenAllItem>, Error> {
-        let paths = os::list_drives()?;
+    pub(crate) fn open_all() -> Result<impl Iterator<Item = OpenAllItem>, Error> {
+        let paths = os::drive_paths()?;
 
         let drives = paths
             .into_iter()
@@ -133,7 +160,7 @@ impl Drive {
     }
 
     /// Run checks on drive.
-    pub fn check(&self) -> Result<Box<[VendorResult]>, Error> {
+    pub(crate) fn check(&self) -> Result<Box<[VendorResult]>, Error> {
         let mut vendor_results = Vec::new();
 
         for vendor_type in VENDOR_TYPES {
@@ -155,26 +182,30 @@ impl Drive {
     }
 
     /// Display drive type and information
-    pub fn display_info(&self) -> Result<String, Error> {
+    pub(crate) fn display_info(&self) -> Result<String, Error> {
         let info = match self {
             Self::Scsi(x) => x.inquiry()?.to_string(),
             Self::Ata(x) => x.identify_device()?.to_string(),
+            Self::Nvme(x) => {
+                let identify = x.identify_controller()?;
+
+                // Total capacity requires namespace or capacity management
+                let capacity = match identify.capacity() {
+                    Some(x) => x,
+                    None => x.total_namespace_size()?,
+                };
+
+                identify.display_capacity(capacity)
+            },
         };
 
         Ok(format!("{self} {info}"))
     }
 }
 
-impl TryFrom<scsi::Drive> for Drive {
-    type Error = Error;
-
-    fn try_from(scsi_drive: scsi::Drive) -> Result<Self, Self::Error> {
-        // Try convert to ATA drive to check if ATA (SAT)
-        match ata::Drive::try_from(scsi_drive) {
-            Ok(ata_drive) => Ok(ata_drive.into()),
-            Err(ata::Error::UnsupportedDrive(scsi_drive)) => Ok(Self::Scsi(scsi_drive)),
-            Err(x) => Err(x.into()),
-        }
+impl From<scsi::Drive> for Drive {
+    fn from(value: scsi::Drive) -> Self {
+        Self::Scsi(value)
     }
 }
 
@@ -184,11 +215,18 @@ impl From<ata::Drive> for Drive {
     }
 }
 
+impl From<nvme::Drive> for Drive {
+    fn from(value: nvme::Drive) -> Self {
+        Self::Nvme(value)
+    }
+}
+
 impl std::fmt::Display for Drive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Scsi(x) => x.fmt(f),
             Self::Ata(x) => x.fmt(f),
+            Self::Nvme(x) => x.fmt(f),
         }
     }
 }
@@ -204,7 +242,7 @@ pub struct CheckResult {
 
 impl CheckResult {
     /// Construct check result.
-    pub fn new(name: String, result: Result<String, Error>) -> Self {
+    pub(crate) fn new(name: String, result: Result<String, Error>) -> Self {
         Self { name, result }
     }
 }
@@ -234,6 +272,7 @@ const VENDOR_TYPES: &[&dyn VendorType] = &[
     &phison::ata::s10::VendorType,
     &phison::ata::s11::VendorType,
     &phison::ata::s12::VendorType,
+    &phison::nvme::e13::VendorType,
     &seagate::ata::f3::VendorType,
     &wd::ata::marvell::VendorType,
 ];

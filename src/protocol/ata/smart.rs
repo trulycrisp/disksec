@@ -11,8 +11,6 @@ pub enum Error {
     InvalidSelfTestExecutionStatus(u8),
     /// Invalid self-test percent-remaining value.
     InvalidSelfTestPercentageRemaining(u8),
-    /// SMART ENABLE subcommand failed.
-    EnableFailed,
 }
 
 impl std::error::Error for Error {}
@@ -29,9 +27,6 @@ impl std::fmt::Display for Error {
             },
             Self::InvalidSelfTestPercentageRemaining(x) => {
                 write!(f, "invalid self-test percentage remaining {x:#x}")
-            },
-            Self::EnableFailed => {
-                write!(f, "subcommand ENABLE failed")
             },
         }
     }
@@ -240,7 +235,6 @@ pub struct Smart {
     /// Off-line data collection capability fields.
     pub offline_data_collection_capability: OfflineDataCollectionCapability,
     /// SMART capability fields.
-    #[allow(clippy::struct_field_names)]
     pub smart_capability: SmartCapability,
     /// Supports SMART error logging.
     pub error_logging_supported: bool,
@@ -258,7 +252,7 @@ pub struct Smart {
 
 impl Smart {
     /// Size in bytes.
-    pub const SIZE: usize = super::SECTOR_SIZE;
+    pub(crate) const SIZE: usize = super::SECTOR_SIZE;
 }
 
 impl TryFrom<&[u8; Smart::SIZE]> for Smart {

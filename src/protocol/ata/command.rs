@@ -231,7 +231,7 @@ impl From<u8> for Command {
 
         if let Some(x) = CONST_VARIANTS
             .iter()
-            .find(|&&y| Into::<u8>::into(y) == value)
+            .find(|&&y| u8::from(y) == value)
             .copied()
         {
             return x;
@@ -350,8 +350,8 @@ impl std::fmt::Display for CommandRegisters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(feature: {:#x}, count: {:#x}, lba: {:#x}, device: {:#x}, command: {})",
-            self.feature, self.count, self.lba, self.device, self.command
+            "{} (feature: {:#x}, count: {:#x}, LBA: {:#x}, device: {:#x})",
+            self.command, self.feature, self.count, self.lba, self.device
         )
     }
 }
@@ -361,32 +361,32 @@ impl std::fmt::Display for CommandRegisters {
 pub struct StatusRegister(u8);
 
 impl StatusRegister {
-    /// STATUS ALIGNMENT ERROR bit.
-    pub const ALIGNMENT_ERROR_MASK: u8 = 1 << 2;
     /// STATUS DEVICE FAULT bit.
-    pub const DEVICE_FAULT_MASK: u8 = 1 << 5;
-    /// STATUS ERROR bit.
-    pub const ERROR_MASK: u8 = 1 << 0;
+    pub(crate) const DEVICE_FAULT_MASK: u8 = 1 << 5;
+    /// STATUS ALIGNMENT ERROR bit.
+    pub(crate) const ALIGNMENT_ERROR_MASK: u8 = 1 << 2;
     /// STATUS SENSE DATA AVAILABLE bit.
-    pub const SENSE_DATA_AVAILABLE_MASK: u8 = 1 << 1;
+    pub(crate) const SENSE_DATA_AVAILABLE_MASK: u8 = 1 << 1;
+    /// STATUS ERROR bit.
+    pub(crate) const ERROR_MASK: u8 = 1 << 0;
 
     /// Device-fault bit set.
-    pub fn device_fault(self) -> bool {
+    pub(crate) fn device_fault(self) -> bool {
         (self.0 & Self::DEVICE_FAULT_MASK) != 0
     }
 
     /// Alignment-error bit set.
-    pub fn alignment_error(self) -> bool {
+    pub(crate) fn alignment_error(self) -> bool {
         (self.0 & Self::ALIGNMENT_ERROR_MASK) != 0
     }
 
     /// Sense data available bit set.
-    pub fn sense_data_available(self) -> bool {
+    pub(crate) fn sense_data_available(self) -> bool {
         (self.0 & Self::SENSE_DATA_AVAILABLE_MASK) != 0
     }
 
     /// Error bit set.
-    pub fn error(self) -> bool {
+    pub(crate) fn error(self) -> bool {
         (self.0 & Self::ERROR_MASK) != 0
     }
 }
@@ -422,7 +422,7 @@ impl std::fmt::Display for ResultRegisters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(error: {:#04x}, count: {:#06x}, lba: {:#014x}, device: {:#04x}, status: {:#04x})",
+            "(error: {:#x}, count: {:#x}, LBA: {:#x}, device: {:#x}, status: {:#x})",
             self.error, self.count, self.lba, self.device, self.status.0
         )
     }

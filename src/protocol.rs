@@ -1,6 +1,7 @@
 //! Drive command set protocols.
 
 pub mod ata;
+pub mod nvme;
 pub mod scsi;
 
 /// Data transfer.
@@ -16,7 +17,7 @@ pub enum Transfer<'a> {
 
 impl Transfer<'_> {
     /// Get transfer size in bytes.
-    pub const fn size(&self) -> usize {
+    pub(crate) const fn size(&self) -> usize {
         match self {
             Self::None => 0,
             Self::Read(x) => x.len(),

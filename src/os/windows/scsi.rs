@@ -179,21 +179,17 @@ impl Interface {
             sptds.sptd
         );
 
+        match result {
+            Err(x) if x.is_ioctl_unsupported() => return Err(scsi::Error::UnsupportedDrive),
+            Err(x) => return Err(x.into()),
+            Ok(_) => {},
+        }
+
         let status = sptds.sptd.scsi_status;
 
         let sense_size = sptds.sptd.sense_info_length as _;
         if sense_size > sptds.sense.len() {
             return Err(Error::InvalidSptdSenseSize(sptds.sptd.sense_info_length).into());
-        }
-
-        match result {
-            Err(x) if x.is_ioctl_unsupported() => return Err(scsi::Error::UnsupportedDrive),
-            Err(x) if status == 0 && sense_size == 0 => {
-                // Only handle as an OS-level error if sense and status not received otherwise
-                // return to SCSI layer to parse as SCSI error
-                return Err(x.into());
-            },
-            _ => {},
         }
 
         let transferred_size = match sptds.sptd.data_transfer_length {

@@ -76,7 +76,7 @@ fn cipher_crc16_keystream(size: usize, seed: u32, offset: usize) -> Box<[u8]> {
 }
 
 /// Encrypt/decrypt CRC-16 based cipher.
-pub fn cipher_crc16(data: &[u8], seed: u32, offset: usize) -> Box<[u8]> {
+pub(super) fn cipher_crc16(data: &[u8], seed: u32, offset: usize) -> Box<[u8]> {
     let mut keystream = cipher_crc16_keystream(data.len(), seed, offset);
 
     for (k, d) in keystream.iter_mut().zip(data) {

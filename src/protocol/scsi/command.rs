@@ -19,7 +19,7 @@ pub trait Cdb {
 
 impl std::fmt::Display for dyn Cdb + '_ {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", crate::output::format_bytes(&self.to_bytes()))
+        write!(f, "{}", crate::output::format_bytes_hex(&self.to_bytes()))
     }
 }
 
@@ -124,7 +124,7 @@ pub struct AtaPassThrough16 {
     pub protocol: SatProtocol,
     /// Extended LBA-48 command.
     pub extend: bool,
-    /// Maximum seconds the device may be offline during the command.
+    /// Time the ATA status may be invalid, 0 to 3 for 0, 2, 6 or 14 seconds.
     pub off_line: u8,
     /// Request the SATL always return the ATA result registers in sense.
     pub ck_cond: bool,
@@ -145,7 +145,7 @@ pub struct AtaPassThrough16 {
 
 impl AtaPassThrough16 {
     /// Construct CDB.
-    pub fn new(
+    pub(crate) fn new(
         registers: ata::command::CommandRegisters,
         transfer: &Transfer,
         extend: bool,
@@ -209,6 +209,8 @@ impl Cdb for AtaPassThrough16 {
         let count = self.registers.count.to_be_bytes();
         let [_, _, lba @ ..] = self.registers.lba.to_be_bytes();
 
+        let device = self.registers.device;
+
         Box::new([
             OpCode::AtaPassThrough16 as _,
             byte1,
@@ -223,7 +225,7 @@ impl Cdb for AtaPassThrough16 {
             lba[4],
             lba[0],
             lba[3],
-            self.registers.device,
+            device,
             self.registers.command.into(),
             self.control,
         ])
@@ -300,6 +302,55 @@ mod tests {
             t_dir: SatTransferDirection::FromDevice,
             byt_blok: true,
             t_length: SatTransferLength::Count,
+            registers,
+            control: 0,
+        };
+
+        assert_eq!(cdb.to_bytes().as_ref(), DATA);
+    }
+
+    #[test]
+    fn ata_pass_through16_to_bytes_lba28() {
+        const COUNT: u16 = 0x6F;
+        const LBA: u64 = 0xFA_EF_FE;
+        const DEVICE: u8 = 0xAF;
+        const COMMAND: u8 = 0xE0;
+        const DATA: &[u8] = &[
+            0x85,
+            0x06,
+            0x24,
+            0x00,
+            0x00,
+            (COUNT >> 8) as _,
+            (COUNT & 0xFF) as _,
+            ((LBA >> 24) & 0xFF) as _,
+            (LBA & 0xFF) as _,
+            ((LBA >> 32) & 0xFF) as _,
+            ((LBA >> 8) & 0xFF) as _,
+            ((LBA >> 40) & 0xFF) as _,
+            ((LBA >> 16) & 0xFF) as _,
+            DEVICE,
+            COMMAND,
+            0x00,
+        ];
+
+        let registers = ata::command::CommandRegisters {
+            count: COUNT,
+            lba: LBA,
+            device: DEVICE,
+            command: COMMAND.into(),
+            ..Default::default()
+        };
+
+        let cdb = AtaPassThrough16 {
+            protocol: SatProtocol::NonData,
+            extend: false,
+            off_line: 0,
+            ck_cond: true,
+            t_type: false,
+            t_dir: SatTransferDirection::ToDevice,
+            byt_blok: true,
+            t_length: SatTransferLength::None,
             registers,
             control: 0,
         };

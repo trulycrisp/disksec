@@ -16,11 +16,44 @@ pub fn format_error(mut error: &dyn std::error::Error) -> String {
 }
 
 /// Display byte slice as hex.
-pub fn format_bytes(data: &[u8]) -> String {
+pub fn format_bytes_hex(data: &[u8]) -> String {
     data.iter()
         .map(|x| format!("{x:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Format byte size helper.
+fn format_byte_size(mut size: u64, step: u64, units: &[&str]) -> String {
+    let mut remainder = 0;
+    let mut unit = 0;
+
+    while size >= step && unit < units.len() - 1 {
+        remainder = size % step;
+        size /= step;
+        unit += 1;
+    }
+
+    // The remainder is a fraction of a step, scale it to hundredths of the unit
+    let fraction = remainder * 100 / step;
+
+    format!("{size}.{fraction:02} {}", units[unit])
+}
+
+/// Display size in byte units, decimal prefixes.
+pub fn format_byte_size_decimal(size: u64) -> String {
+    const STEP: u64 = 1000;
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+
+    format_byte_size(size, STEP, UNITS)
+}
+
+/// Display size in byte units, binary prefixes.
+pub fn format_byte_size_binary(size: u64) -> String {
+    const STEP: u64 = 1024;
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+
+    format_byte_size(size, STEP, UNITS)
 }
 
 /// Write output header.
@@ -132,4 +165,23 @@ pub fn write_output(output: &[u8], file_path: Option<&Path>) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_size_format() {
+        assert_eq!(format_byte_size_decimal(0), "0.00 B");
+        assert_eq!(format_byte_size_decimal(512), "512.00 B");
+        assert_eq!(format_byte_size_decimal(500_107_862_016), "500.10 GB");
+        // A fraction below a tenth of the unit keeps its leading zero
+        assert_eq!(format_byte_size_decimal(1_073_741_824), "1.07 GB");
+        // The largest unit is not exceeded
+        assert_eq!(format_byte_size_decimal(u64::MAX), "18.44 EB");
+
+        assert_eq!(format_byte_size_binary(1_073_741_824), "1.00 GiB");
+        assert_eq!(format_byte_size_binary(1_500_000_000), "1.39 GiB");
+    }
 }

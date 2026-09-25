@@ -21,56 +21,6 @@ use crate::protocol::{
     },
 };
 
-/// Info block data magic prefix.
-const INFO_BLOCK_MAGIC: &[u8] = b"PhIsOn";
-
-/// VUC lock state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VucLockState {
-    /// Locked.
-    Locked = 1,
-    /// Engineering.
-    Engineering = 2,
-    /// Unlocked.
-    Unlocked = 3,
-    /// No lock (no key configured).
-    NoLock = 4,
-}
-
-impl VucLockState {
-    /// Parse from raw byte.
-    fn parse(value: u8) -> Result<Option<Self>, u8> {
-        const VARIANTS: &[VucLockState] = &[
-            VucLockState::Locked,
-            VucLockState::Engineering,
-            VucLockState::Unlocked,
-            VucLockState::NoLock,
-        ];
-
-        if value == 0 {
-            return Ok(None);
-        }
-
-        VARIANTS
-            .iter()
-            .find(|&&x| x as u8 == value)
-            .copied()
-            .ok_or(value)
-            .map(Some)
-    }
-}
-
-impl std::fmt::Display for VucLockState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Locked => write!(f, "locked"),
-            Self::Engineering => write!(f, "engineering"),
-            Self::Unlocked => write!(f, "unlocked"),
-            Self::NoLock => write!(f, "no lock"),
-        }
-    }
-}
-
 /// Phison ATA drive.
 trait Drive: Display {
     /// Get ATA drive.
@@ -84,10 +34,8 @@ impl dyn Drive + '_ {
 
         let is_ssd = identify.rotation_rate == Some(identify::RotationRate::NonRotating);
 
-        // SMART enabled with a command, so only check for enabled field's presence not
-        // value
         let has_smart = identify.features_supported.smart == Some(true)
-            && identify.features_enabled.smart.is_some();
+            && identify.features_enabled.smart == Some(true);
 
         let has_gpl = identify.features_supported.gpl == Some(true)
             && identify.features_enabled.gpl == Some(true);
@@ -161,13 +109,10 @@ impl dyn Drive + '_ {
             return Ok(false);
         }
 
-        // Ensure SMART is enabled for following checks
-        ata_drive.smart_enable()?;
-
         // Check SMART data
         let smart = ata_drive.smart_read_data()?;
-        // This is marked vendor-specific here and in ACS-3, but it's the old SMART
-        // revision number
+        // This is marked vendor-specific here and in ACS-3, but it's the old
+        // SMART revision number
         let smart_revision =
             u16::from_le_bytes([smart.vendor_specific_1[0], smart.vendor_specific_1[1]]);
         let smart_revision_match = smart_revision == SMART_REVISION;

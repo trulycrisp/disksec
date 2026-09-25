@@ -17,11 +17,6 @@ or modified, as such it should be safe to execute without risk of damage or othe
 side effects, however as with any tool accessing low-level undocumented hardware
 features usage is at your own risk.
 
-Ideally drives should be tested attached directly to a hardware SATA controller,
-however USB-SATA adapters are technically compatible and should work in most cases,
-some USB-SATA bridge chipsets may have compatibility issues transporting VUCs used
-by some drive types.
-
 ## Usage
 
 List available drives:

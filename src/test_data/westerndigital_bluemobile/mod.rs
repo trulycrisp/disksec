@@ -2,8 +2,8 @@
 
 /// Identify device response.
 pub(crate) const IDENTIFY: &[u8; 512] = include_bytes!("identify.bin");
-/// VUC native information response.
-pub(crate) const NATIVE_INFO: &[u8; 512] = include_bytes!("native_info.bin");
+/// VUC physical parameters table.
+pub(crate) const PHYSICAL_PARAMETERS: &[u8; 512] = include_bytes!("physical_parameters.bin");
 /// System area file ID 0x1 (directory).
 pub(crate) const FILE_1H: &[u8; 16_384] = include_bytes!("file_1h.bin");
 /// CPU exception vector table in memory.

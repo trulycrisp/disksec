@@ -223,18 +223,10 @@ struct SgIoHdr {
 }
 
 /// Enumerate SCSI drives.
-pub fn list_drives() -> Result<Box<[PathBuf]>, super::Error> {
-    const DEV_PATH: &str = "/dev";
-    const SCSI_GENERIC_PATH: &str = "/sys/class/scsi_generic";
+pub fn drive_paths() -> Result<Box<[PathBuf]>, super::Error> {
+    const CLASS: &str = "scsi_generic";
 
-    let dev_base = Path::new(DEV_PATH);
-
-    let mut paths = Vec::new();
-    for entry_result in Path::new(SCSI_GENERIC_PATH).read_dir()? {
-        paths.push(dev_base.join(entry_result?.file_name()));
-    }
-
-    Ok(paths.into())
+    super::drive_paths_class(CLASS)
 }
 
 /// SCSI drive interface.
@@ -255,6 +247,10 @@ impl scsi::Interface for Interface {
             .open(path)
             .map_err(super::Error::from)?;
 
+        if Subsystem::get(&file)? != Some(Subsystem::Scsi) {
+            return Err(scsi::Error::UnsupportedDrive);
+        }
+
         let interface = Self {
             path: path.to_owned(),
             file,
@@ -264,7 +260,7 @@ impl scsi::Interface for Interface {
 
         let mut sg_version: c_int = 0;
         match unsafe { super::Ioctl::SgGetVersionNum.execute(&interface.file, &mut sg_version) } {
-            Ok(()) => {},
+            Ok(_) => {},
             Err(super::Error::Io(x)) if x.raw_os_error() == Some(libc::ENOTTY) => {
                 debug!("[{interface}] SG unsupported");
                 return Err(scsi::Error::UnsupportedDrive);
@@ -272,16 +268,6 @@ impl scsi::Interface for Interface {
             Err(x) => return Err(x.into()),
         }
         debug!("[{interface}] SG version: {sg_version}");
-
-        let subsystem = Subsystem::get(&interface.file)?;
-        debug!(
-            "[{interface}] Subsystem: {}",
-            subsystem.map_or("N/A".to_string(), |x| x.to_string())
-        );
-
-        if subsystem != Some(Subsystem::Scsi) {
-            return Err(scsi::Error::UnsupportedDrive);
-        }
 
         Ok(interface)
     }
@@ -297,7 +283,6 @@ impl scsi::Interface for Interface {
         timeout: u32,
     ) -> Result<(u8, usize, Box<[u8]>), scsi::Error> {
         const MS_PER_SEC: u32 = 1000;
-        /// `interface_id` selector requesting the v3 sg interface.
         const SG_IO_INTERFACE_ID: c_int = b'S' as _;
 
         let transfer_size = transfer.size();

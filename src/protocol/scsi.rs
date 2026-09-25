@@ -9,7 +9,7 @@ use std::path::Path;
 use log::{debug, info};
 
 use super::Transfer;
-use crate::os;
+use crate::{os, output};
 
 /// Maximum sense data size.
 pub const SENSE_BUFFER_SIZE: usize = 252;
@@ -39,7 +39,7 @@ pub enum Error {
 
 impl Error {
     /// Error represents a command failing.
-    pub fn is_command_error(&self) -> bool {
+    pub(crate) fn is_command_error(&self) -> bool {
         matches!(self, Self::Status(_) | Self::Sense(_))
     }
 }
@@ -153,7 +153,7 @@ impl std::fmt::Display for Status {
     }
 }
 
-/// OS-specific SCSI drive interface.
+/// SCSI transport interface.
 pub trait Interface: Sized {
     /// Open drive.
     fn open(path: &Path) -> Result<Self, Error>;
@@ -171,13 +171,13 @@ pub trait Interface: Sized {
 /// Drive interface.
 #[derive(Debug)]
 pub struct Drive {
-    /// OS-specific interface.
+    /// SCSI transport interface.
     interface: os::scsi::Interface,
 }
 
 impl Drive {
     /// Open drive.
-    pub fn open(path: &Path) -> Result<Self, Error> {
+    pub(crate) fn open(path: &Path) -> Result<Self, Error> {
         let interface = os::scsi::Interface::open(path)?;
         let drive = Self { interface };
 
@@ -193,12 +193,12 @@ impl Drive {
     }
 
     /// Get path of drive.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.interface.path()
     }
 
     /// Execute command.
-    pub fn command(
+    pub(crate) fn command(
         &self,
         cdb: &dyn command::Cdb,
         transfer: Transfer,
@@ -211,29 +211,30 @@ impl Drive {
         let log_info = format!("CDB: {cdb}, transfer: {transfer}");
         debug!("[{self}] Executing command: ({log_info})");
 
-        let (status, transfer_size, sense) =
+        let (status, transfer_size, sense_data) =
             self.interface.command(&cdb_bytes, transfer, timeout)?;
 
         let status = Status::try_from(status)?;
 
-        // Check status and parse sense
-        let sense = match status {
-            Status::Good | Status::ConditionMet => None,
+        let sense = (!sense_data.is_empty())
+            .then(|| sense::Sense::try_from(sense_data.as_ref()))
+            .transpose()?;
+
+        match status {
+            Status::Good | Status::ConditionMet => {},
             Status::CheckCondition => {
-                if sense.is_empty() {
+                if sense.is_none() {
                     return Err(Error::NoSense);
                 }
-
-                Some(sense::Sense::try_from(sense.as_ref())?)
             },
             x => return Err(Error::Status(x)),
-        };
+        }
 
         info!(
             "[{self}] Executed command: ({log_info}, size: {transfer_size}, sense: {})",
             match &sense {
                 None => String::from("none"),
-                Some(x) => x.to_string(),
+                Some(x) => format!("{x} ({})", output::format_bytes_hex(&sense_data)),
             }
         );
 
@@ -250,7 +251,7 @@ impl Drive {
     }
 
     /// Execute inquiry command.
-    pub fn inquiry(&self) -> Result<inquiry::Inquiry, Error> {
+    pub(crate) fn inquiry(&self) -> Result<inquiry::Inquiry, Error> {
         let mut data = [0u8; inquiry::Inquiry::MAX_SIZE];
 
         let allocation_length = size_of_val(&data).try_into().unwrap();

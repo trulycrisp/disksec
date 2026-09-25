@@ -4,7 +4,7 @@ use crate::protocol::scsi::sense;
 
 /// SDBP error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
+pub(super) enum Error {
     /// Data truncated.
     Truncated,
     /// Invalid port value.
@@ -27,7 +27,7 @@ impl std::fmt::Display for Error {
 
 /// SDBP port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Port {
+pub(super) enum Port {
     /// Diagnostic Internal Test Service.
     Dits = 1,
     /// Diagnostic External Test Service.
@@ -57,18 +57,18 @@ impl std::fmt::Display for Port {
 
 /// Diagnostic Function Block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Dfb<'a> {
+pub(super) struct Dfb<'a> {
     /// Function ID.
-    pub function: u16,
+    pub(super) function: u16,
     /// Function revision ID.
-    pub revision: u16,
+    pub(super) revision: u16,
     /// Function-specific parameter data.
-    pub data: &'a [u8],
+    pub(super) data: &'a [u8],
 }
 
 impl Dfb<'_> {
     /// Header size in bytes.
-    pub const HEADER_SIZE: usize = 4;
+    pub(super) const HEADER_SIZE: usize = 4;
 }
 
 impl From<&Dfb<'_>> for Box<[u8]> {
@@ -85,18 +85,18 @@ impl From<&Dfb<'_>> for Box<[u8]> {
 
 /// DITS Diagnostic Status Block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DitsDsb<'a> {
+pub(super) struct DitsDsb<'a> {
     /// SCSI sense key.
-    pub sense_key: sense::SenseKey,
+    pub(super) sense_key: sense::SenseKey,
     /// SCSI ASC/ASCQ.
-    pub asc: sense::asc::AdditionalSenseCode,
+    pub(super) asc: sense::asc::AdditionalSenseCode,
     /// Function-specific status data.
-    pub data: &'a [u8],
+    pub(super) data: &'a [u8],
 }
 
 impl DitsDsb<'_> {
     /// Header size in bytes.
-    pub const HEADER_SIZE: usize = 16;
+    pub(super) const HEADER_SIZE: usize = 16;
 }
 
 impl<'a> TryFrom<&'a [u8]> for DitsDsb<'a> {
@@ -113,8 +113,10 @@ impl<'a> TryFrom<&'a [u8]> for DitsDsb<'a> {
             return Err(Error::InvalidDitsDsb);
         }
 
-        let sense_key = sense::SenseKey::try_from(header[1]).or(Err(Error::InvalidDitsDsb))?;
-        let asc = sense::asc::AdditionalSenseCode::parse(header[2], header[3]);
+        let sense_key =
+            sense::SenseKey::try_from(header[1] & 0xF).or(Err(Error::InvalidDitsDsb))?;
+        let asc = sense::asc::AdditionalSenseCode::parse(header[2], header[3])
+            .or(Err(Error::InvalidDitsDsb))?;
 
         Ok(Self {
             sense_key,
@@ -126,18 +128,18 @@ impl<'a> TryFrom<&'a [u8]> for DitsDsb<'a> {
 
 /// SDBP packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Packet<'a> {
+pub(super) struct Packet<'a> {
     /// Source port.
-    pub from: Port,
+    pub(super) from: Port,
     /// Destination port.
-    pub to: Port,
+    pub(super) to: Port,
     /// Packet payload.
-    pub data: &'a [u8],
+    pub(super) data: &'a [u8],
 }
 
 impl Packet<'_> {
     /// Header size in bytes.
-    pub const HEADER_SIZE: usize = 8;
+    pub(super) const HEADER_SIZE: usize = 8;
 }
 
 impl<'a> TryFrom<&'a [u8]> for Packet<'a> {

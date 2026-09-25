@@ -9,11 +9,11 @@ pub enum Manufacturer {
     Fujitsu = 0x4,
     /// Renesas (Hitachi).
     Renesas = 0x7,
-    /// `STMicroelectronics` / Numonyx.
+    /// STMicroelectronics / Numonyx.
     StMicro = 0x20,
     /// Micron.
     Micron = 0x2C,
-    /// `SanDisk`.
+    /// SanDisk.
     SanDisk = 0x45,
     /// SMIC.
     Smic = 0x4A,
@@ -23,7 +23,7 @@ pub enum Manufacturer {
     Intel = 0x89,
     /// National Semiconductor.
     National = 0x8F,
-    /// ESMT (`PowerChip`).
+    /// ESMT (PowerChip).
     EsmtPowerchip = 0x92,
     /// Kioxia (Toshiba).
     Kioxia = 0x98,
@@ -33,7 +33,7 @@ pub enum Manufacturer {
     Issi = 0x9D,
     /// SK Hynix.
     SkHynix = 0xAD,
-    /// `SpecTek` (Micron).
+    /// SpecTek (Micron).
     SpecTek = 0xB5,
     /// Macronix.
     Macronix = 0xC2,
@@ -48,7 +48,6 @@ pub enum Manufacturer {
 }
 
 impl TryFrom<u8> for Manufacturer {
-    /// The unrecognised byte is returned verbatim.
     type Error = u8;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {

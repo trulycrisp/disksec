@@ -1,13 +1,15 @@
 //! S11 controller.
 
 mod algorithm;
+mod info_block;
+mod system_info;
 mod vuc;
 
 use std::num::NonZero;
 
 use log::{debug, info};
 
-use super::VucLockState;
+use crate::drive::phison::VucLockState;
 use crate::{
     cpu::VECTOR_TABLE_SIZE,
     drive,
@@ -88,7 +90,7 @@ impl From<ata::Error> for Error {
 impl From<Error> for drive::Error {
     fn from(value: Error) -> Self {
         match value {
-            Error::Ata(x) => Self::Ata(x),
+            Error::Ata(x) => x.into(),
             x => Self::Vendor(Box::new(x)),
         }
     }
@@ -133,265 +135,6 @@ impl std::fmt::Display for VucOperation {
     }
 }
 
-/// Flash interface type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FlashInterface {
-    /// Async SDR.
-    Sdr = 1,
-    /// Toggle DDR 1.0.
-    Toggle1 = 2,
-    ///  Toggle DDR 2.0.
-    Toggle2 = 3,
-    /// NV-DDR.
-    NvDdr = 4,
-    /// NV-DDR2.
-    NvDdr2 = 5,
-    /// NV-DDR3.
-    NvDdr3 = 8,
-}
-
-impl FlashInterface {
-    /// Parse from raw byte.
-    fn parse(value: u8) -> Result<Option<Self>, Error> {
-        const VARIANTS: &[FlashInterface] = &[
-            FlashInterface::Sdr,
-            FlashInterface::Toggle1,
-            FlashInterface::Toggle2,
-            FlashInterface::NvDdr,
-            FlashInterface::NvDdr2,
-            FlashInterface::NvDdr3,
-        ];
-
-        Ok(match value {
-            0 | 0xFF => None,
-            x => Some(
-                VARIANTS
-                    .iter()
-                    .find(|&&y| y as u8 == x)
-                    .copied()
-                    .ok_or(Error::InvalidSystemInfo)?,
-            ),
-        })
-    }
-}
-
-/// VUC system info result.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SystemInfo {
-    /// Number of flash CEs.
-    ce_count: u8,
-    /// Number of flash channels.
-    channel_count: u8,
-    /// SRAM size in MB.
-    sram_size: u8,
-    /// Flash pages per block.
-    pages_per_block: u16,
-    /// Flash dies per CE.
-    dies_per_ce: u8,
-    /// Die-level interleaving enabled, requires multi-die flash.
-    die_interleave: bool,
-    /// Number of die groups a CE is split into for interleaving.
-    die_interleave_factor: u8,
-    /// Flash blocks per die.
-    blocks_per_die: u32,
-    /// Flash blocks per CE.
-    blocks_per_ce: u32,
-    /// Sectors per flash page.
-    sectors_per_page: u32,
-    /// Number of blocks per channel in a superblock if any.
-    channel_interleave_factor: u8,
-    /// Flash planes per die.
-    planes_per_die: u8,
-    /// Drive form factor.
-    form_factor: Option<identify::FormFactor>,
-    /// Flash blocks per superblock.
-    blocks_per_superblock: u8,
-    /// Firmware sub-version.
-    firmware_subversion: String,
-    /// Stride between dies in a flash block address.
-    die_stride: Option<NonZero<u16>>,
-    ///  Total flash size divided by superblock size.
-    superblock_index_count: u32,
-    /// Number of sectors per superblock.
-    sectors_per_superblock: u32,
-    /// Number of usable superblocks.
-    superblock_count: u32,
-    /// Bitmask of chip enable addresses with errors.
-    ce_error_bitmap: u64,
-    /// Sectors per superblock page.
-    sectors_per_superblock_page: u32,
-    /// Flash interface type.
-    flash_interface: Option<FlashInterface>,
-    /// Protected mode active.
-    protected_mode: bool,
-    /// Total firmware update count.
-    firmware_update_count: u16,
-    /// Total system unit (drive config data) update count.
-    system_unit_update_count: u16,
-    /// Bitmap of active chip enable addresses.
-    ce_bitmap: u64,
-    /// Firmware version.
-    firmware_version: String,
-    /// Firmware build date.
-    firmware_date: String,
-    /// VUC PRAM icode program is complete.
-    pram_icode_programmed: bool,
-    /// Page size including metadata if any.
-    physical_page_size: Option<NonZero<u16>>,
-    /// VUC lock has a key configured.
-    vuc_lock_key_set: bool,
-    /// VUC lock key ID.
-    vuc_lock_key: Option<NonZero<u16>>,
-    /// VUC lock state.
-    vuc_lock_state: Option<VucLockState>,
-}
-
-impl SystemInfo {
-    /// Size in bytes.
-    const SIZE: usize = SECTOR_SIZE;
-
-    /// Parse string.
-    fn parse_str(data: &[u8]) -> Result<&str, Error> {
-        data.iter()
-            .all(|x| x.is_ascii_graphic() || x.is_ascii_whitespace())
-            .then(|| std::str::from_utf8(data).unwrap())
-            .ok_or(Error::InvalidSystemInfo)
-    }
-}
-
-impl TryFrom<&[u8; Self::SIZE]> for SystemInfo {
-    type Error = Error;
-
-    #[allow(clippy::too_many_lines)]
-    fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
-        const MAX_CE_COUNT: u8 = 16;
-        const MAX_CHANNEL_COUNT: u8 = 2;
-        const SRAM_SIZE: u8 = 32;
-        const FIRMWARE_VERSION_PREFIX: &str = "SB";
-        const FIRMWARE_DATE_PREFIX: &str = "20";
-
-        let ce_count = data[0];
-        if ce_count > MAX_CE_COUNT {
-            return Err(Error::InvalidSystemInfo);
-        }
-
-        let channel_count = data[2];
-        if channel_count > MAX_CHANNEL_COUNT {
-            return Err(Error::InvalidSystemInfo);
-        }
-
-        let sram_size = 1u8
-            .checked_shl(data[3].into())
-            .ok_or(Error::InvalidSystemInfo)?;
-        if sram_size != SRAM_SIZE {
-            return Err(Error::InvalidSystemInfo);
-        }
-
-        let pages_per_block = u16::from_le_bytes([data[4], data[5]]);
-        let dies_per_ce = data[6];
-        let die_interleave = data[10] != 0;
-        let die_interleave_factor = data[11];
-        let blocks_per_die = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
-        let blocks_per_ce = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
-        let sectors_per_page = u32::from_le_bytes([data[40], data[41], data[42], data[43]]);
-        let channel_interleave_factor = data[72];
-        let planes_per_die = data[73];
-
-        let form_factor =
-            identify::FormFactor::parse(data[75]).or(Err(Error::InvalidSystemInfo))?;
-
-        let blocks_per_superblock = data[200];
-        let firmware_subversion = Self::parse_str(&data[201..203])?.into();
-
-        let die_stride = NonZero::new(u16::from_le_bytes([data[204], data[205]]));
-        let superblock_index_count =
-            u32::from_le_bytes([data[208], data[209], data[210], data[211]]);
-
-        let sectors_per_superblock =
-            u32::from_le_bytes([data[212], data[213], data[214], data[215]]);
-
-        let superblock_count = u32::from_le_bytes([data[216], data[217], data[218], data[219]]);
-
-        let ce_error_bitmap = u64::from_le_bytes([
-            data[236], data[237], data[238], data[239], data[462], data[463], data[464], data[465],
-        ]);
-
-        let sectors_per_superblock_page =
-            u32::from_le_bytes([data[240], data[241], data[242], data[243]]);
-
-        let flash_interface = FlashInterface::parse(data[244])?;
-        let protected_mode = data[247] != 0;
-        let firmware_update_count = u16::from_le_bytes([data[248], data[249]]);
-        let system_unit_update_count = u16::from_le_bytes([data[250], data[251]]);
-
-        let ce_bitmap = u64::from_le_bytes([
-            data[328], data[329], data[330], data[331], data[332], data[333], data[334], data[335],
-        ]);
-        if ce_bitmap.count_ones() != ce_count.into() {
-            return Err(Error::InvalidSystemInfo);
-        }
-
-        let firmware_version =
-            identify::parse_string(&data[344..352]).or(Err(Error::InvalidSystemInfo))?;
-        if !firmware_version.starts_with(FIRMWARE_VERSION_PREFIX) {
-            return Err(Error::InvalidSystemInfo);
-        }
-
-        let firmware_date = format!(
-            "{} {} {}",
-            Self::parse_str(&data[352..356])?,
-            Self::parse_str(&data[356..359])?,
-            Self::parse_str(&data[359..361])?.trim(),
-        );
-        if !firmware_date.starts_with(FIRMWARE_DATE_PREFIX) {
-            return Err(Error::InvalidSystemInfo);
-        }
-
-        let pram_icode_programmed = data[363] != 0;
-        let physical_page_size = NonZero::new(u16::from_le_bytes([data[418], data[419]]));
-
-        let vuc_lock_key_set = (data[423] & (1 << 3)) != 0;
-        let vuc_lock_key = NonZero::new(u16::from_be_bytes([data[424], data[425]]));
-        let vuc_lock_state = VucLockState::parse(data[426]).or(Err(Error::InvalidSystemInfo))?;
-
-        Ok(Self {
-            ce_count,
-            channel_count,
-            sram_size,
-            pages_per_block,
-            dies_per_ce,
-            die_interleave,
-            die_interleave_factor,
-            blocks_per_die,
-            blocks_per_ce,
-            sectors_per_page,
-            channel_interleave_factor,
-            planes_per_die,
-            form_factor,
-            blocks_per_superblock,
-            firmware_subversion,
-            die_stride,
-            superblock_index_count,
-            sectors_per_superblock,
-            superblock_count,
-            ce_error_bitmap,
-            sectors_per_superblock_page,
-            flash_interface,
-            protected_mode,
-            firmware_update_count,
-            system_unit_update_count,
-            ce_bitmap,
-            firmware_version,
-            firmware_date,
-            pram_icode_programmed,
-            physical_page_size,
-            vuc_lock_key_set,
-            vuc_lock_key,
-            vuc_lock_state,
-        })
-    }
-}
-
 /// Firmware header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FirmwareHeader {
@@ -420,35 +163,6 @@ impl From<FirmwareHeader> for [u8; SECTOR_SIZE] {
         data[ENGINEERING_MODE_OFFSET] = FirmwareHeader::pack_bool(value.engineering_mode);
 
         data
-    }
-}
-
-/// Info block (drive configuration).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct InfoBlock {
-    /// Serial number.
-    serial: String,
-    /// Model.
-    model: String,
-}
-
-impl InfoBlock {
-    /// Size in bytes.
-    const SIZE: usize = SECTOR_SIZE;
-}
-
-impl TryFrom<&[u8; Self::SIZE]> for InfoBlock {
-    type Error = Error;
-
-    fn try_from(data: &[u8; Self::SIZE]) -> Result<Self, Self::Error> {
-        if !data.starts_with(super::INFO_BLOCK_MAGIC) {
-            return Err(Error::InvalidInfoBlock);
-        }
-
-        let serial = identify::parse_string(&data[18..38]).or(Err(Error::InvalidInfoBlock))?;
-        let model = identify::parse_string(&data[38..78]).or(Err(Error::InvalidInfoBlock))?;
-
-        Ok(Self { serial, model })
     }
 }
 
@@ -499,7 +213,7 @@ struct Drive<'a> {
     ata: &'a ata::Drive,
 }
 
-impl Drive<'_> {
+impl<'a> Drive<'a> {
     /// Validate identify device result matches supported drive.
     fn validate_identify(identify: &identify::IdentifyDevice, drive: Option<Self>) -> bool {
         let no_drat = identify.additional_supported.is_some_and(|x| !x.drat);
@@ -517,22 +231,24 @@ impl Drive<'_> {
         valid
     }
 
-    /// Validate supported drive.
-    fn validate(self) -> Result<bool, Error> {
+    /// Open drive.
+    fn open(ata: &'a ata::Drive) -> Result<Option<Self>, Error> {
+        let drive = Self { ata };
+
         // Run common Phison checks
-        if !(&self as &dyn super::Drive).validate()? {
-            return Ok(false);
+        if !(&drive as &dyn super::Drive).validate()? {
+            return Ok(None);
         }
 
         // Check identify device fields
-        let identify = self.ata.identify_device()?;
-        if !Self::validate_identify(&identify, Some(self)) {
-            return Ok(false);
+        let identify = ata.identify_device()?;
+        if !Self::validate_identify(&identify, Some(drive)) {
+            return Ok(None);
         }
 
         // Check VUC system info
-        let system_info_result = self.vuc_system_info();
-        debug!("[{self}] Validate VUC system info: {system_info_result:?}");
+        let system_info_result = drive.vuc_system_info();
+        debug!("[{drive}] Validate VUC system info: {system_info_result:?}");
         let system_info = match system_info_result {
             Ok(_) => true,
             Err(Error::Ata(x)) if x.is_command_error() => false,
@@ -540,11 +256,11 @@ impl Drive<'_> {
             Err(x) => return Err(x),
         };
         if !system_info {
-            return Ok(false);
+            return Ok(None);
         }
 
-        debug!("[{self}] Validated");
-        Ok(true)
+        debug!("[{drive}] Validated");
+        Ok(Some(drive))
     }
 
     /// Execute VUC.
@@ -560,8 +276,8 @@ impl Drive<'_> {
     }
 
     /// VUC system info.
-    fn vuc_system_info(self) -> Result<SystemInfo, Error> {
-        let mut data = [0u8; SystemInfo::SIZE];
+    fn vuc_system_info(self) -> Result<system_info::SystemInfo, Error> {
+        let mut data = [0u8; system_info::SystemInfo::SIZE];
 
         self.vuc(Transfer::Read(&mut data), VucOperation::SystemInfo, 0)?;
 
@@ -700,8 +416,8 @@ impl Drive<'_> {
     }
 
     /// VUC read info block.
-    fn vuc_read_info_block(self) -> Result<InfoBlock, Error> {
-        let mut data = [0u8; InfoBlock::SIZE];
+    fn vuc_read_info_block(self) -> Result<info_block::InfoBlock, Error> {
+        let mut data = [0u8; info_block::InfoBlock::SIZE];
 
         self.vuc(Transfer::Read(&mut data), VucOperation::ReadInfoBlock, 0)?;
         let info_block = (&data).try_into()?;
@@ -758,7 +474,9 @@ impl Drive<'_> {
         const REGISTER_SIZE: usize = 4;
 
         for (index, chunk) in data.chunks_mut(REGISTER_SIZE).enumerate() {
-            let register_address = address + u32::try_from(index * REGISTER_SIZE).unwrap();
+            let register_address = address
+                .checked_add(u32::try_from(index * REGISTER_SIZE).unwrap())
+                .unwrap();
             let mut buffer = [0u8; REGISTER_SIZE];
 
             self.vuc_read_register(register_address, &mut buffer)?;
@@ -870,14 +588,15 @@ impl drive::VendorType for VendorType {
         &self,
         drive: &drive::Drive,
     ) -> Result<Option<Box<[drive::CheckResult]>>, drive::Error> {
-        let drive = match drive {
-            drive::Drive::Ata(ata) => Drive { ata },
-            drive::Drive::Scsi(_) => return Ok(None),
+        // Drive must be ATA
+        let drive::Drive::Ata(ata_drive) = drive else {
+            return Ok(None);
         };
 
-        if !drive.validate()? {
+        // Attempt to open drive
+        let Some(drive) = Drive::open(ata_drive)? else {
             return Ok(None);
-        }
+        };
 
         let mut results = Vec::new();
 
@@ -950,47 +669,6 @@ mod tests {
         for &data in DATA_INVALID {
             let identify = identify::IdentifyDevice::try_from(data).unwrap();
             assert!(!Drive::validate_identify(&identify, None));
-        }
-    }
-
-    #[test]
-    fn parse_system_info() {
-        const DATA_VALID: &[&[u8; SystemInfo::SIZE]] = &[
-            test_data::kingston_a400::SYSTEM_INFO,
-            test_data::inland_professional::SYSTEM_INFO,
-        ];
-        const DATA_INVALID: &[&[u8; SystemInfo::SIZE]] = &[
-            &[0; _],
-            &[0xFF; _],
-            test_data::corsair_nova2::SYSTEM_INFO,      // S5
-            test_data::kingston_ssdnow100::SYSTEM_INFO, // S8
-            test_data::patriot_blaze::SYSTEM_INFO,      // S9
-            test_data::ocz_trion150::SYSTEM_INFO,       // S10
-        ];
-
-        for &data in DATA_VALID {
-            assert!(SystemInfo::try_from(data).is_ok());
-        }
-
-        for &data in DATA_INVALID {
-            assert!(SystemInfo::try_from(data).is_err());
-        }
-    }
-
-    #[test]
-    fn parse_info_block() {
-        const DATA_VALID: &[&[u8; InfoBlock::SIZE]] = &[
-            test_data::kingston_a400::INFO_BLOCK,
-            test_data::inland_professional::INFO_BLOCK,
-        ];
-        const DATA_INVALID: &[&[u8; InfoBlock::SIZE]] = &[&[0; _], &[0xFF; _]];
-
-        for &data in DATA_VALID {
-            assert!(InfoBlock::try_from(data).is_ok());
-        }
-
-        for &data in DATA_INVALID {
-            assert!(InfoBlock::try_from(data).is_err());
         }
     }
 

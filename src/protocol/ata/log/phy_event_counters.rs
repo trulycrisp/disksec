@@ -107,7 +107,7 @@ impl CounterId {
 
         if let Some(x) = CONST_VARIANTS
             .iter()
-            .find(|&&y| Into::<u16>::into(y) == id)
+            .find(|&&y| u16::from(y) == id)
             .copied()
         {
             return Ok(Some(x));

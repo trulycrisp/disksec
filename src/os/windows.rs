@@ -1,5 +1,7 @@
 //! Windows OS interface.
 
+pub mod ata;
+pub mod nvme;
 pub mod scsi;
 
 use std::{ffi::c_void, fs::File, os::windows::io::AsRawHandle, path::PathBuf};
@@ -14,11 +16,11 @@ const FILE_SHARE_WRITE: u32 = 2;
 const ERROR_INVALID_FUNCTION: i32 = 1;
 /// Error code `ERROR_NOT_SUPPORTED`.
 const ERROR_NOT_SUPPORTED: i32 = 50;
-/// `STORAGE_PROPERTY_ID::StorageDeviceProperty`.
+/// `STORAGE_PROPERTY_ID.StorageDeviceProperty`.
 const STORAGE_DEVICE_PROPERTY: u32 = 0;
-/// `STORAGE_PROPERTY_ID::StorageAdapterProperty`.
+/// `STORAGE_PROPERTY_ID.StorageAdapterProperty`.
 const STORAGE_ADAPTER_PROPERTY: u32 = 1;
-/// `STORAGE_QUERY_TYPE::PropertyStandardQuery`.
+/// `STORAGE_QUERY_TYPE.PropertyStandardQuery`.
 const PROPERTY_STANDARD_QUERY: u32 = 0;
 
 /// Windows error.
@@ -26,10 +28,12 @@ const PROPERTY_STANDARD_QUERY: u32 = 0;
 pub enum Error {
     /// IO error.
     Io(std::io::Error),
-    /// Invalid value for `STORAGE_DEVICE_DESCRIPTOR::BusType`.
+    /// Invalid value for `STORAGE_DEVICE_DESCRIPTOR.BusType`.
     InvalidStorageBusType(u32),
     /// SCSI interface error.
     Scsi(scsi::Error),
+    /// NVMe interface error.
+    Nvme(nvme::Error),
 }
 
 impl Error {
@@ -49,6 +53,7 @@ impl std::error::Error for Error {
         match self {
             Self::Io(x) => Some(x),
             Self::Scsi(x) => Some(x),
+            Self::Nvme(x) => Some(x),
             Self::InvalidStorageBusType(_) => None,
         }
     }
@@ -60,6 +65,7 @@ impl std::fmt::Display for Error {
             Self::Io(_) => write!(f, "IO error"),
             Self::InvalidStorageBusType(x) => write!(f, "invalid storage bus type {x:#x}"),
             Self::Scsi(_) => write!(f, "SCSI error"),
+            Self::Nvme(_) => write!(f, "NVMe error"),
         }
     }
 }
@@ -73,6 +79,12 @@ impl From<std::io::Error> for Error {
 impl From<scsi::Error> for Error {
     fn from(value: scsi::Error) -> Self {
         Self::Scsi(value)
+    }
+}
+
+impl From<nvme::Error> for Error {
+    fn from(value: nvme::Error) -> Self {
+        Self::Nvme(value)
     }
 }
 
@@ -98,6 +110,10 @@ enum Ioctl {
     StorageQueryProperty = 0x2D_1400,
     /// `IOCTL_SCSI_PASS_THROUGH_DIRECT`.
     ScsiPassThroughDirect = 0x4D014,
+    /// `IOCTL_ATA_PASS_THROUGH_DIRECT`.
+    AtaPassThroughDirect = 0x4D030,
+    /// `IOCTL_STORAGE_PROTOCOL_COMMAND`.
+    StorageProtocolCommand = 0x2D_D3C0,
 }
 
 impl Ioctl {
@@ -127,6 +143,29 @@ impl Ioctl {
 
         Ok(returned)
     }
+
+    /// Execute ioctl with data buffer.
+    unsafe fn execute_buffer(self, file: &File, buffer: &mut [u8]) -> Result<u32, Error> {
+        let mut returned = 0;
+        let size = buffer.len().try_into().unwrap();
+        let result = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                self as _,
+                buffer.as_mut_ptr().cast(),
+                size,
+                buffer.as_mut_ptr().cast(),
+                size,
+                &raw mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            return Err(Error::last_os_error());
+        }
+
+        Ok(returned)
+    }
 }
 
 impl std::fmt::Display for Ioctl {
@@ -134,12 +173,14 @@ impl std::fmt::Display for Ioctl {
         f.write_str(match self {
             Self::StorageQueryProperty => "IOCTL_STORAGE_QUERY_PROPERTY",
             Self::ScsiPassThroughDirect => "IOCTL_SCSI_PASS_THROUGH_DIRECT",
+            Self::AtaPassThroughDirect => "IOCTL_ATA_PASS_THROUGH_DIRECT",
+            Self::StorageProtocolCommand => "IOCTL_STORAGE_PROTOCOL_COMMAND",
         })
     }
 }
 
 /// Enumerates drives.
-pub fn list_drives() -> Result<Box<[PathBuf]>, Error> {
+pub fn drive_paths() -> Result<Box<[PathBuf]>, Error> {
     const BUFFER_SIZE: usize = 131_072;
     const PATH_PREFIX: &str = r"\\.\";
     const NAME_PREFIX: &str = "PhysicalDrive";

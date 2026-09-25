@@ -5,7 +5,7 @@ pub mod asc;
 
 use std::num::NonZero;
 
-use crate::{output, protocol::ata};
+use crate::protocol::ata;
 
 /// Sense error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum Error {
     InvalidSenseKey(u8),
     /// Invalid descriptor type value.
     InvalidDescriptorType(u8),
+    /// Invalid additional sense code value.
+    InvalidAdditionalSenseCode(u8, u8),
 }
 
 impl std::error::Error for Error {}
@@ -32,6 +34,9 @@ impl std::fmt::Display for Error {
             Self::InvalidSenseKey(x) => write!(f, "invalid sense key {x:#x}"),
             Self::InvalidDescriptorType(x) => {
                 write!(f, "invalid descriptor type {x:#x}")
+            },
+            Self::InvalidAdditionalSenseCode(x, y) => {
+                write!(f, "invalid additional sense code {x:#x} qualifier {y:#x}")
             },
         }
     }
@@ -52,7 +57,7 @@ pub enum ResponseCode {
 
 impl ResponseCode {
     /// Mask for response code values.
-    pub const MASK: u8 = 0b111_1111;
+    pub(crate) const MASK: u8 = 0b111_1111;
 }
 
 impl std::fmt::Display for ResponseCode {
@@ -122,7 +127,7 @@ pub enum SenseKey {
 
 impl SenseKey {
     /// If sense key represents an error.
-    pub fn is_error(self) -> bool {
+    pub(crate) fn is_error(self) -> bool {
         matches!(
             self,
             Self::NotReady
@@ -208,8 +213,6 @@ pub struct AtaReturnFixed {
 /// Fixed-format sense data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedSense {
-    /// Raw bytes.
-    raw: Box<[u8]>,
     /// Information field is valid (not vendor-specific).
     pub valid: bool,
     /// Response code was deferred.
@@ -269,13 +272,13 @@ impl FixedSense {
         let csi = data.get(8..).and_then(<[_]>::first_chunk).copied();
         let asc = data
             .get(12..14)
-            .map(|x| asc::AdditionalSenseCode::parse(x[0], x[1]));
+            .map(|x| asc::AdditionalSenseCode::parse(x[0], x[1]))
+            .transpose()?;
         let fru = data.get(14).copied();
         let sks = data.get(15..).and_then(<[_]>::first_chunk).copied();
         let sksv = sks.map(|x| x[0] & (1 << 7) != 0);
 
         Ok(Self {
-            raw: data.into(),
             valid,
             deferred,
             filemark,
@@ -293,10 +296,11 @@ impl FixedSense {
     }
 
     /// Get SAT ATA return information.
-    pub fn ata_return(&self) -> Option<AtaReturnFixed> {
+    pub(crate) fn ata_return(&self) -> Option<AtaReturnFixed> {
         let csi = self.csi?;
 
-        // Don't check valid before parsing information, some SATLs seem not to set it
+        // Don't check valid before parsing information, some SATLs seem not to
+        // set it
         let [error, status, device, count] = self.information;
         let count = count.into();
 
@@ -334,7 +338,11 @@ impl FixedSense {
 
 impl std::fmt::Display for FixedSense {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", output::format_bytes(&self.raw))
+        let asc = self
+            .asc
+            .map_or_else(|| "N/A".to_string(), |x| x.to_string());
+
+        write!(f, "{} {asc}", self.sense_key)
     }
 }
 
@@ -391,7 +399,7 @@ impl Descriptor {
 
         if !extend {
             count &= 0xFF;
-            lba &= 0xFF_FFFF;
+            lba &= 0xFFF_FFFF;
         }
 
         let device = data[DEVICE_OFFSET];
@@ -440,8 +448,6 @@ impl Descriptor {
 /// Descriptor-format sense.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescriptorSense {
-    /// Raw bytes.
-    raw: Box<[u8]>,
     /// Response code was deferred.
     pub deferred: bool,
     /// Sense key.
@@ -465,7 +471,7 @@ impl DescriptorSense {
         };
 
         let sense_key = SenseKey::try_from(header[1] & 0xF)?;
-        let asc = asc::AdditionalSenseCode::parse(header[2], header[3]);
+        let asc = asc::AdditionalSenseCode::parse(header[2], header[3])?;
         let additional_length = header[7] as _;
 
         // Resize additional to supplied size
@@ -485,7 +491,6 @@ impl DescriptorSense {
         }
 
         Ok(Self {
-            raw: data.into(),
             deferred,
             sense_key,
             asc,
@@ -496,7 +501,7 @@ impl DescriptorSense {
 
 impl std::fmt::Display for DescriptorSense {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", crate::output::format_bytes(&self.raw))
+        write!(f, "{} {}", self.sense_key, self.asc)
     }
 }
 
@@ -511,7 +516,7 @@ pub enum Sense {
 
 impl Sense {
     /// Get sense key.
-    pub fn sense_key(&self) -> SenseKey {
+    pub(crate) fn sense_key(&self) -> SenseKey {
         match self {
             Self::Fixed(x) => x.sense_key,
             Self::Descriptor(x) => x.sense_key,
@@ -589,7 +594,10 @@ mod tests {
         assert!(!sense.valid);
         assert!(!sense.deferred);
         assert_eq!(sense.sense_key, SENSE_KEY);
-        assert_eq!(sense.asc, Some(asc::AdditionalSenseCode::parse(ASC, ASCQ)));
+        assert_eq!(
+            sense.asc,
+            Some(asc::AdditionalSenseCode::parse(ASC, ASCQ).unwrap())
+        );
         assert_eq!(sense.fru, Some(FRU));
         assert_eq!(sense.sksv, Some(false));
 
@@ -629,8 +637,41 @@ mod tests {
 
         assert!(sense.deferred);
         assert_eq!(sense.sense_key, SENSE_KEY);
-        assert_eq!(sense.asc, asc::AdditionalSenseCode::parse(ASC, ASCQ));
+        assert_eq!(
+            sense.asc,
+            asc::AdditionalSenseCode::parse(ASC, ASCQ).unwrap()
+        );
         assert!(sense.descriptors.is_empty());
+    }
+
+    #[test]
+    fn parse_ata_return_descriptor_lba28() {
+        const ERROR: u8 = 0x51;
+        const COUNT: u16 = 0x34;
+        const LBA: u64 = 0x0FED_CBA9;
+        const DEVICE: u8 = 0xEF;
+        const STATUS: u8 = 0x50;
+        const DATA: &[u8] = &[
+            0x00,
+            ERROR,
+            0x00,
+            (COUNT & 0xFF) as _,
+            ((LBA >> 24) & 0xFF) as _,
+            (LBA & 0xFF) as _,
+            0x00,
+            ((LBA >> 8) & 0xFF) as _,
+            0x00,
+            ((LBA >> 16) & 0xFF) as _,
+            DEVICE,
+            STATUS,
+        ];
+
+        let registers = Descriptor::ata_return_parse(DATA).unwrap();
+        assert_eq!(registers.error, ERROR);
+        assert_eq!(registers.count, COUNT);
+        assert_eq!(registers.lba, LBA);
+        assert_eq!(registers.device, DEVICE);
+        assert_eq!(registers.status, STATUS.into());
     }
 
     #[test]

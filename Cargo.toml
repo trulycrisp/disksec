@@ -1,17 +1,25 @@
 [package]
 name = "disksec"
 description = "Storage drive firmware security assessment"
-version = "0.2.0"
+version = "0.3.0"
 repository = "https://github.com/trulycrisp/disksec"
+license = "MIT"
 keywords = ["drive", "disk", "storage", "security", "firmware"]
 categories = ["command-line-utilities", "hardware-support"]
 edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.0", features = ["derive"] }
-env_logger = { version = "0.11.10", features = ["color"] }
-libc = "0.2.183"
+env_logger = { version = "0.11.10", default-features = false, features = ["auto-color", "humantime"] }
 log = "0.4.29"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.183"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
 
 [lints.rust]
 missing_docs = "warn"
@@ -21,3 +29,7 @@ pedantic = { level = "warn", priority = -1 }
 missing_docs_in_private_items = "warn"
 similar_names = "allow"
 struct_excessive_bools = "allow"
+struct_field_names = "allow"
+enum_variant_names = "allow"
+too_many_lines = "allow"
+doc_markdown = "allow"

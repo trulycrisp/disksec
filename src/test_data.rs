@@ -14,6 +14,7 @@ pub mod kingston_ssdnow100;
 pub mod ocz_trion150;
 pub mod patriot_blast;
 pub mod patriot_blaze;
+pub mod patriot_p300;
 pub mod phison_s5;
 pub mod phison_s9;
 pub mod samsung_840;

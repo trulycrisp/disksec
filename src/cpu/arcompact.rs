@@ -1,8 +1,8 @@
-//! `ARCompact` architecture functionality.
+//! ARCompact architecture functionality.
 
 use super::VECTOR_TABLE_SIZE;
 
-/// Check data is an `ARCompact` vector table.
+/// Check data is an ARCompact vector table.
 pub fn is_vector_table(data: &[u8; VECTOR_TABLE_SIZE]) -> bool {
     const SLOT_SIZE: usize = 8;
     const SLOT_PREFIX: &[u8] = &[0x20, 0x20, 0x80, 0x0F]; // j <x>

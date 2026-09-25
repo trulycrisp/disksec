@@ -1,6 +1,8 @@
-//! Seagate `BarraCuda` Pro ST500LM035-2GJ17A.
+//! Seagate BarraCuda Pro ST500LM035-2GJ17A.
 
 /// Identify device response.
 pub(crate) const IDENTIFY: &[u8; 512] = include_bytes!("identify.bin");
-/// VUC firmware information response.
-pub(crate) const FIRMWARE_INFO: &[u8; 512] = include_bytes!("firmware_info.bin");
+/// VUC ID Page 0 response.
+pub(crate) const ID_PAGE_0: &[u8; 512] = include_bytes!("id_page_0.bin");
+/// VUC ID Page 11 response.
+pub(crate) const ID_PAGE_11: &[u8; 512] = include_bytes!("id_page_11.bin");

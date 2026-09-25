@@ -771,14 +771,12 @@ pub enum AdditionalSenseCode {
     UnassignedDeviceTypeCode(u8, u8),
     VendorSpecific(u8, u8),
     VendorSpecificQualification(u8, u8),
-    Reserved(u8, u8),
 }
 
 impl AdditionalSenseCode {
     /// Parse ASC/ASCQ values.
-    #[allow(clippy::too_many_lines)]
-    pub fn parse(asc: u8, ascq: u8) -> Self {
-        match (asc, ascq) {
+    pub(crate) fn parse(asc: u8, ascq: u8) -> Result<Self, super::Error> {
+        Ok(match (asc, ascq) {
             (0x00, 0x00) => Self::NoAdditionalSenseInformation,
             (0x00, 0x01) => Self::FilemarkDetected,
             (0x00, 0x02) => Self::EndOfPartitionOrMediumDetected,
@@ -1550,13 +1548,12 @@ impl AdditionalSenseCode {
             (0x70, ascq) => Self::DecompressionExceptionShortAlgorithmId(ascq),
             (0x80..=0xFF, _) => Self::VendorSpecific(asc, ascq),
             (_, 0x80..=0xFF) => Self::VendorSpecificQualification(asc, ascq),
-            _ => Self::Reserved(asc, ascq),
-        }
+            _ => return Err(super::Error::InvalidAdditionalSenseCode(asc, ascq)),
+        })
     }
 }
 
 impl std::fmt::Display for AdditionalSenseCode {
-    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoAdditionalSenseInformation => write!(f, "NO ADDITIONAL SENSE INFORMATION"),
@@ -3158,7 +3155,6 @@ impl std::fmt::Display for AdditionalSenseCode {
                 "VENDOR SPECIFIC QUALIFICATION OF STANDARD ASC (ASC 0x{asc:02X}, ASCQ \
                  0x{ascq:02X})"
             ),
-            Self::Reserved(asc, ascq) => write!(f, "RESERVED (ASC 0x{asc:02X}, ASCQ 0x{ascq:02X})"),
         }
     }
 }

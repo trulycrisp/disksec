@@ -128,7 +128,7 @@ impl Log {
     const VENDOR_SPECIFIC_RANGE: Range<u8> = 0xA0..0xE0;
 
     /// Is SMART log.
-    pub fn smart(self) -> bool {
+    pub(crate) fn smart(self) -> bool {
         matches!(
             self,
             Self::Directory
@@ -147,7 +147,7 @@ impl Log {
     }
 
     /// Is GPL log.
-    pub fn gpl(self) -> bool {
+    pub(crate) fn gpl(self) -> bool {
         matches!(
             self,
             Self::Directory
@@ -226,7 +226,7 @@ impl TryFrom<u8> for Log {
 
         if let Some(x) = CONST_VARIANTS
             .iter()
-            .find(|&&y| Into::<u8>::into(y) == value)
+            .find(|&&y| u8::from(y) == value)
             .copied()
         {
             return Ok(x);
@@ -300,7 +300,6 @@ impl Directory {
 
     /// Validate directory version.
     fn validate_version(data: &[u8; PAGE_SIZE]) -> Result<(), Error> {
-        /// Only directory version defined by the standard (0001h).
         const VERSION: u16 = 1;
 
         let version = u16::from_le_bytes([data[0], data[1]]);
@@ -325,7 +324,7 @@ impl Directory {
     }
 
     /// Parse SMART log directory.
-    pub fn parse_smart(data: &[u8; PAGE_SIZE]) -> Result<Self, Error> {
+    pub(crate) fn parse_smart(data: &[u8; PAGE_SIZE]) -> Result<Self, Error> {
         const ENTRY_STRIDE: usize = 2;
 
         Self::validate_version(data)?;
@@ -340,7 +339,7 @@ impl Directory {
     }
 
     /// Parse General Purpose Log directory.
-    pub fn parse_gpl(data: &[u8; PAGE_SIZE]) -> Result<Self, Error> {
+    pub(crate) fn parse_gpl(data: &[u8; PAGE_SIZE]) -> Result<Self, Error> {
         const ENTRY_SIZE: usize = size_of::<u16>();
 
         Self::validate_version(data)?;
